@@ -96,6 +96,7 @@ def main() -> int:
     use_t_signal = True  # True：使用做T信号（专注盘中波动）；False：使用标准买卖信号
     # True：打印所有信号（包括"暂不操作"）；False：只打印买入/卖出
     print_all_signals = True
+    log_ai_detail = True  # True：在日志文件中记录AI完整分析；False：只记录简洁信号
     position_costs = {  # 各品种的持仓成本（可选，用于计算盈亏）
         "159218": 1.197,
         "159840": 0.869,
@@ -222,8 +223,41 @@ def main() -> int:
                                 f"{code} {rt_date}\n【{strategy_label}】信号={signal}\n理由={reason}"
                             )
 
-                        # 输出到日志
+                        # 输出简洁信号到控制台
                         logger.info(msg)
+
+                        # 如果启用了 AI 详细日志，将完整的 report（包含AI详细分析）记录到日志文件
+                        if log_ai_detail and use_t_signal and enable_deepseek:
+                            # 清理格式：移除多余的缩进
+                            import logging
+                            import re
+
+                            # 移除每行开头的多余空格（保留相对缩进）
+                            lines = report.split("\n")
+                            cleaned_lines = []
+                            for line in lines:
+                                # 移除行首的多余空格，但保留相对缩进结构
+                                stripped = line.lstrip()
+                                # 如果是以 "- **" 开头的，去掉 "- "
+                                if stripped.startswith("- **"):
+                                    stripped = stripped[2:]
+                                cleaned_lines.append(stripped)
+
+                            cleaned_report = "\n".join(cleaned_lines)
+
+                            for handler in logger.handlers:
+                                if isinstance(handler, logging.FileHandler):
+                                    # 创建日志记录，记录格式化后的 report
+                                    record = logging.LogRecord(
+                                        name=logger.name,
+                                        level=logging.INFO,
+                                        pathname=__file__,
+                                        lineno=0,
+                                        msg=f"\n{cleaned_report}\n",  # 完整的 AI 分析报告（已格式化）
+                                        args=(),
+                                        exc_info=None,
+                                    )
+                                    handler.emit(record)
 
                         # AI 辅助分析（仅在非做T模式下，或做T模式但未启用 DeepSeek 时）
                         ai_msg = ""

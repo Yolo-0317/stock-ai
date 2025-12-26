@@ -1327,5 +1327,383 @@ def _parse_intraday_t_response(response: str) -> dict:
     return result
 
 
+def deepseek_premarket_analysis(
+    code: str,
+    position_cost: float = None,
+    position_ratio: float = 0.0,
+) -> str:
+    """
+    盘前分析（开盘前）- 基于昨日收盘数据给出今日操作建议。
+
+    参数：
+    - code: 股票代码（支持 6 位或带后缀）
+    - position_cost: 持仓成本（可选）
+    - position_ratio: 当前仓位比例（0.0-1.0）
+
+    返回：
+    - str: 格式化的盘前分析报告
+    """
+    try:
+        from sqlalchemy import create_engine
+
+        # 1. 从 MySQL 读取历史数据
+        mysql_url = os.getenv("MYSQL_URL")
+        if not mysql_url:
+            return "❌ 盘前分析失败: 未配置 MYSQL_URL"
+
+        code_6 = _normalize_code(code)
+        engine = create_engine(mysql_url)
+
+        query = f"""
+            SELECT trade_date, open, high, low, close, vol, pct_chg, pre_close
+            FROM stock_daily
+            WHERE ts_code = '{code_6}'
+            ORDER BY trade_date DESC
+            LIMIT 20
+        """
+        df = pd.read_sql(query, engine)
+        engine.dispose()
+
+        if df.empty:
+            return f"❌ 盘前分析失败: 未找到 {code} 的历史数据"
+
+        # 计算均线
+        df = df.sort_values("trade_date").reset_index(drop=True)
+        df["ma5"] = df["close"].rolling(5).mean()
+        df["ma20"] = df["close"].rolling(20).mean()
+        df = df.sort_values("trade_date", ascending=False).reset_index(drop=True)
+
+        # 2. 构建 Prompt
+        latest = df.iloc[0]
+        hist_df = df.head(10)
+
+        position_info = {"cost": position_cost, "ratio": position_ratio}
+        prompt = _build_premarket_prompt(code, hist_df, latest, position_info)
+
+        # 3. 调用 DeepSeek API
+        analysis = _call_deepseek_api(prompt)
+        if not analysis:
+            return "❌ 盘前分析失败: DeepSeek API 调用失败"
+
+        # 4. 格式化输出
+        report = f"""
+        ### 🌅 盘前分析: {code}
+        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        📊 **昨日收盘** ({latest['trade_date']})
+        收盘价: {latest['close']:.3f}  |  涨跌: {latest['pct_chg']:.2f}%
+        日内区间: {latest['low']:.3f} ~ {latest['high']:.3f}
+        技术指标: MA5={latest['ma5']:.4f}, MA20={latest['ma20']:.4f}
+
+        {_format_position_info(position_info, latest['close'])}
+        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+        📋 **AI 盘前分析**：
+        {analysis}
+
+        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        """
+        return report
+
+    except Exception as e:
+        return f"❌ 盘前分析过程中出错: {e}"
+
+
+def deepseek_aftermarket_analysis(
+    code: str,
+    position_cost: float = None,
+    position_ratio: float = 0.0,
+) -> str:
+    """
+    盘后分析（收盘后）- 复盘今日走势并给出明日展望。
+
+    参数：
+    - code: 股票代码（支持 6 位或带后缀）
+    - position_cost: 持仓成本（可选）
+    - position_ratio: 当前仓位比例（0.0-1.0）
+
+    返回：
+    - str: 格式化的盘后分析报告
+    """
+    try:
+        from sqlalchemy import create_engine
+
+        # 1. 从 MySQL 读取历史数据
+        mysql_url = os.getenv("MYSQL_URL")
+        if not mysql_url:
+            return "❌ 盘后分析失败: 未配置 MYSQL_URL"
+
+        code_6 = _normalize_code(code)
+        engine = create_engine(mysql_url)
+
+        query = f"""
+            SELECT trade_date, open, high, low, close, vol, pct_chg, pre_close
+            FROM stock_daily
+            WHERE ts_code = '{code_6}'
+            ORDER BY trade_date DESC
+            LIMIT 20
+        """
+        df = pd.read_sql(query, engine)
+
+        # 2. 读取今日分钟线数据
+        intraday_query = f"""
+            SELECT bar_time, open, high, low, close, vol, pct_chg
+            FROM stock_intraday_snapshot
+            WHERE ts_code = '{code_6}' AND DATE(bar_time) = CURDATE()
+            ORDER BY bar_time ASC
+        """
+        intraday_df = pd.read_sql(intraday_query, engine)
+        engine.dispose()
+
+        if df.empty:
+            return f"❌ 盘后分析失败: 未找到 {code} 的历史数据"
+
+        # 计算均线
+        df = df.sort_values("trade_date").reset_index(drop=True)
+        df["ma5"] = df["close"].rolling(5).mean()
+        df["ma20"] = df["close"].rolling(20).mean()
+        df = df.sort_values("trade_date", ascending=False).reset_index(drop=True)
+
+        # 3. 构建 Prompt
+        latest = df.iloc[0]
+        hist_df = df.head(10)
+
+        # 处理分钟线数据
+        intraday_bars = []
+        if not intraday_df.empty:
+            for _, row in intraday_df.iterrows():
+                intraday_bars.append(
+                    {
+                        "time": row["bar_time"].strftime("%H:%M"),
+                        "open": row["open"],
+                        "high": row["high"],
+                        "low": row["low"],
+                        "close": row["close"],
+                        "vol": row["vol"],
+                        "pct_chg": row["pct_chg"],
+                    }
+                )
+
+        position_info = {"cost": position_cost, "ratio": position_ratio}
+        prompt = _build_aftermarket_prompt(
+            code, hist_df, latest, position_info, intraday_bars
+        )
+
+        # 4. 调用 DeepSeek API
+        analysis = _call_deepseek_api(prompt)
+        if not analysis:
+            return "❌ 盘后分析失败: DeepSeek API 调用失败"
+
+        # 5. 格式化输出
+        intraday_info = (
+            f"（已采集 {len(intraday_bars)} 条分钟数据）"
+            if intraday_bars
+            else "（暂无分钟数据）"
+        )
+
+        report = f"""
+        ### 🌙 盘后分析: {code}
+        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        📊 **今日收盘** ({latest['trade_date']})
+        收盘价: {latest['close']:.3f}  |  涨跌: {latest['pct_chg']:.2f}%
+        日内区间: {latest['low']:.3f} ~ {latest['high']:.3f}
+        技术指标: MA5={latest['ma5']:.4f}, MA20={latest['ma20']:.4f}
+        日内数据: {intraday_info}
+
+        {_format_position_info(position_info, latest['close'])}
+        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+        📋 **AI 盘后复盘**：
+        {analysis}
+
+        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        """
+        return report
+
+    except Exception as e:
+        return f"❌ 盘后分析过程中出错: {e}"
+
+
+def _build_premarket_prompt(
+    code: str, hist_df: pd.DataFrame, latest_data: dict, position_info: dict
+) -> str:
+    """构建盘前分析的 Prompt"""
+    # 历史数据表格
+    hist_lines = ["日期 | 收盘 | 涨跌% | MA5 | MA20"]
+    hist_lines.append("--- | --- | --- | --- | ---")
+    for _, row in hist_df.iterrows():
+        hist_lines.append(
+            f"{row['trade_date']} | {row['close']:.3f} | "
+            f"{row['pct_chg']:.2f}% | {row['ma5']:.3f} | {row['ma20']:.3f}"
+        )
+    hist_table = "\n".join(hist_lines)
+
+    position_text = ""
+    if position_info.get("cost"):
+        profit = (
+            (latest_data["close"] - position_info["cost"]) / position_info["cost"] * 100
+        )
+        position_text = f"""
+## 当前持仓
+- **成本价**: {position_info['cost']:.3f}
+- **当前仓位**: {position_info['ratio']:.1%}
+- **浮动盈亏**: {profit:+.2f}%
+"""
+
+    prompt = f"""
+你是一个专业的股票分析师，现在是开盘前，请基于昨日收盘数据给出今日操作建议。
+
+## 历史行情（最近 10 天）
+{hist_table}
+
+## 昨日收盘数据
+- **日期**: {latest_data['trade_date']}
+- **收盘价**: {latest_data['close']:.3f}
+- **涨跌幅**: {latest_data['pct_chg']:.2f}%
+- **日内区间**: {latest_data['low']:.3f} ~ {latest_data['high']:.3f}
+- **MA5**: {latest_data['ma5']:.4f}
+- **MA20**: {latest_data['ma20']:.4f}
+{position_text}
+
+## 分析要求
+
+请从以下角度进行分析：
+
+1. **趋势分析**：当前处于什么趋势？（上升/下降/震荡）
+2. **技术位置**：价格与均线的关系？是否接近支撑/压力？
+3. **动能分析**：近期涨跌动能如何？是否有转折迹象？
+4. **今日预判**：今日可能的走势方向和关键价位？
+
+## 输出格式
+
+请按以下格式输出：
+
+**趋势判断**: [上升趋势/下降趋势/震荡整理]
+
+**关键价位**:
+- 支撑位: [具体价格]
+- 压力位: [具体价格]
+
+**今日策略**:
+[具体的操作建议，包括：
+- 开盘时应该做什么？（观望/买入/卖出）
+- 什么价位适合操作？
+- 需要注意什么风险？]
+
+**详细分析**:
+[对趋势、技术位置、动能的详细分析，3-5点]
+"""
+    return prompt
+
+
+def _build_aftermarket_prompt(
+    code: str,
+    hist_df: pd.DataFrame,
+    latest_data: dict,
+    position_info: dict,
+    intraday_bars: list = None,
+) -> str:
+    """构建盘后分析的 Prompt"""
+    # 历史数据表格
+    hist_lines = ["日期 | 收盘 | 涨跌% | MA5 | MA20"]
+    hist_lines.append("--- | --- | --- | --- | ---")
+    for _, row in hist_df.iterrows():
+        hist_lines.append(
+            f"{row['trade_date']} | {row['close']:.3f} | "
+            f"{row['pct_chg']:.2f}% | {row['ma5']:.3f} | {row['ma20']:.3f}"
+        )
+    hist_table = "\n".join(hist_lines)
+
+    # 分钟线表格（简化版，只展示开盘和收盘）
+    intraday_table = "暂无分钟线数据"
+    if intraday_bars:
+        bar_lines = ["时间 | 开盘 | 最高 | 最低 | 收盘 | 涨跌%"]
+        bar_lines.append("--- | --- | --- | --- | --- | ---")
+        # 只展示开盘和收盘
+        key_bars = [intraday_bars[0]]  # 开盘
+        if len(intraday_bars) > 1:
+            key_bars.append(intraday_bars[-1])  # 收盘
+        for bar in key_bars:
+            bar_lines.append(
+                f"{bar['time']} | {bar['open']:.3f} | {bar['high']:.3f} | "
+                f"{bar['low']:.3f} | {bar['close']:.3f} | {bar['pct_chg']:.2f}%"
+            )
+        intraday_table = "\n".join(bar_lines)
+        intraday_table += f"\n（共 {len(intraday_bars)} 条分钟数据）"
+
+    position_text = ""
+    if position_info.get("cost"):
+        profit = (
+            (latest_data["close"] - position_info["cost"]) / position_info["cost"] * 100
+        )
+        position_text = f"""
+        ## 当前持仓
+        - **成本价**: {position_info['cost']:.3f}
+        - **当前仓位**: {position_info['ratio']:.1%}
+        - **浮动盈亏**: {profit:+.2f}%
+        """
+
+        prompt = f"""
+        你是一个专业的股票分析师，现在是收盘后，请复盘今日走势并给出明日展望。
+
+        ## 历史行情（最近 10 天）
+        {hist_table}
+
+        ## 今日行情数据
+        - **日期**: {latest_data['trade_date']}
+        - **收盘价**: {latest_data['close']:.3f}
+        - **涨跌幅**: {latest_data['pct_chg']:.2f}%
+        - **日内区间**: {latest_data['low']:.3f} ~ {latest_data['high']:.3f}
+        - **MA5**: {latest_data['ma5']:.4f}
+        - **MA20**: {latest_data['ma20']:.4f}
+        {position_text}
+
+        ## 今日分钟线走势
+        {intraday_table}
+
+        ## 分析要求
+
+        请从以下角度进行复盘和展望：
+
+        1. **今日复盘**：今日走势的特点？涨跌原因？量价关系？
+        2. **技术变化**：今日收盘后技术形态有何变化？
+        3. **明日展望**：基于今日表现，明日可能的走势？
+        4. **操作建议**：持仓者应该如何应对？空仓者是否有机会？
+
+        ## 输出格式
+
+        请按以下格式输出：
+
+        **今日总结**: [今日走势的一句话总结]
+
+        **技术形态**: [今日收盘后的技术形态描述]
+
+        **明日展望**:
+        - 预期方向: [看涨/看跌/震荡]
+        - 关键支撑: [具体价格]
+        - 关键压力: [具体价格]
+
+        **操作建议**:
+        [针对不同情况的操作建议：
+        - 持仓者: 应该持有/减仓/加仓？
+        - 空仓者: 是否有介入机会？
+        - 风险提示: 需要注意什么？]
+
+        **详细分析**:
+        [对今日走势、技术变化、明日展望的详细分析，3-5点]
+        """
+    return prompt
+
+
+def _format_position_info(position_info: dict, current_price: float) -> str:
+    """格式化持仓信息"""
+    if not position_info.get("cost"):
+        return ""
+
+    profit = (current_price - position_info["cost"]) / position_info["cost"] * 100
+    return f"""**持仓信息**:
+   成本价: {position_info['cost']:.3f}  |  仓位: {position_info['ratio']:.1%}
+   浮动盈亏: {profit:+.2f}%"""
+
+
 if __name__ == "__main__":
     mcp.run()
