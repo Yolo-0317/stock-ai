@@ -24,15 +24,17 @@ from logger_config import setup_logging
 from tushare_mcp import deepseek_aftermarket_analysis
 
 # 配置
-CODES = ["159218", "159840"]  # 关注的股票
+CODES = ["159218", "159840", "512400"]  # 关注的股票
 # 持仓成本
 POSITION_COSTS = {
     "159218": 1.197,
+    "512400": None,
     "159840": 0.869,
 }
 # 仓位比例
 POSITION_RATIOS = {
     "159218": 0.2374,
+    "512400": None,
     "159840": 0.1058,
 }
 
