@@ -7,6 +7,12 @@ from datetime import time as dtime
 from datetime import timedelta, timezone
 from pathlib import Path
 
+# 导入日志配置
+from logger_config import setup_monitor_logging
+
+# 初始化日志
+logger = setup_monitor_logging()
+
 # 加载 .env 文件（如果存在）
 try:
     from dotenv import load_dotenv
@@ -14,9 +20,9 @@ try:
     env_path = Path(__file__).parent / ".env"
     if env_path.exists():
         load_dotenv(env_path)
-        print(f"✓ 已加载环境变量：{env_path}")
+        logger.info(f"✓ 已加载环境变量：{env_path}")
 except ImportError:
-    print("⚠ python-dotenv 未安装，跳过 .env 加载（请使用 uv sync 安装依赖）")
+    logger.warning("⚠ python-dotenv 未安装，跳过 .env 加载（请使用 uv sync 安装依赖）")
 
 from tushare_mcp import (
     deepseek_intraday_t_signal,
@@ -31,7 +37,7 @@ try:
     FEISHU_ENABLED = True
 except ImportError:
     FEISHU_ENABLED = False
-    print("未找到 feishu_notice 模块，飞书通知功能将被禁用")
+    logger.warning("未找到 feishu_notice 模块，飞书通知功能将被禁用")
 
 
 def _beijing_now() -> datetime:
@@ -51,19 +57,28 @@ def _is_trading_time_bj(dt: datetime) -> bool:
 
 def _extract_field(report: str, field_name: str) -> str | None:
     """
-    从 intraday_trade_signal 的 markdown 报告里提取字段。
-    例如 field_name='信号'，匹配 '- **信号**: 买入'
+    从报告里提取字段。
+    支持两种格式：
+    1. Markdown: '- **信号**: 买入'
+    2. 纯文本: '📍 执行价格: 1.625'
     """
-    # 使用 [^\n]+ 只匹配当前行，不跨行
-    pattern = rf"\*\*{re.escape(field_name)}\*\*:\s*([^\n]+)"
-    m = re.search(pattern, report)
-    if not m:
-        return None
-    value = m.group(1).strip()
-    # 如果提取到的值为空或者以 "- **" 开头（说明匹配到下一行了），返回 None
-    if not value or value.startswith("- **"):
-        return None
-    return value
+    # 尝试匹配 markdown 格式：**field_name**: value
+    pattern1 = rf"\*\*{re.escape(field_name)}\*\*:\s*([^\n]+)"
+    m = re.search(pattern1, report)
+    if m:
+        value = m.group(1).strip()
+        if value and not value.startswith("- **"):
+            return value
+
+    # 尝试匹配纯文本格式（可能带图标）：执行价格: value 或 📍 执行价格: value
+    pattern2 = rf"(?:^|[\s\-📍💰📊🛡️🎯💡])\s*{re.escape(field_name)}:\s*([^\n]+)"
+    m = re.search(pattern2, report, re.MULTILINE)
+    if m:
+        value = m.group(1).strip()
+        if value:
+            return value
+
+    return None
 
 
 def main() -> int:
@@ -79,6 +94,8 @@ def main() -> int:
 
     # 做T专用配置
     use_t_signal = True  # True：使用做T信号（专注盘中波动）；False：使用标准买卖信号
+    # True：打印所有信号（包括"暂不操作"）；False：只打印买入/卖出
+    print_all_signals = True
     position_costs = {  # 各品种的持仓成本（可选，用于计算盈亏）
         "159218": 1.197,
         "159840": 0.869,
@@ -89,20 +106,24 @@ def main() -> int:
     }
 
     if not codes:
-        print("未提供 codes")
+        logger.error("未提供 codes")
         return 2
 
     last_printed: dict[str, str] = {}  # code -> last_signal_printed
 
-    print(f"开始盯盘：codes={codes} interval={interval}s")
+    logger.info(f"开始盯盘：codes={codes} interval={interval}s")
     if use_t_signal:
-        print("模式：盘中做T信号（专注日内波动）")
+        logger.info("模式：盘中做T信号（专注日内波动）")
     else:
-        print("模式：标准买卖信号（趋势跟踪）")
+        logger.info("模式：标准买卖信号（趋势跟踪）")
+    if print_all_signals:
+        logger.info('打印模式：显示所有信号（包括"暂不操作"）')
+    else:
+        logger.info("打印模式：仅显示买入/卖出信号")
     if enable_feishu and FEISHU_ENABLED:
-        print("飞书通知已启用")
+        logger.info("飞书通知已启用")
     if enable_deepseek:
-        print("DeepSeek AI 辅助分析已启用")
+        logger.info("DeepSeek AI 辅助分析已启用")
 
     while True:
         start = time.time()
@@ -113,14 +134,14 @@ def main() -> int:
                 try:
                     # 根据配置选择使用标准信号还是做T信号
                     if use_t_signal and enable_deepseek:
-                        # 使用 DeepSeek 做T信号
+                        # 使用 DeepSeek 做T信号（新版简化指令）
                         report = deepseek_intraday_t_signal(
                             code=code,
                             position_cost=position_costs.get(code),
                             position_ratio=position_ratios.get(code, 0.0),
                         )
-                        signal_field = "AI 操作建议"
-                        reason_field = "核心理由"
+                        signal_field = "操作指令"
+                        reason_field = "核心原因"
                     else:
                         # 使用标准规则策略信号
                         report = intraday_trade_signal(code=code)
@@ -134,7 +155,7 @@ def main() -> int:
                         or "未查询到东财行情数据" in report
                     ):
                         error_msg = f"[{now_bj.strftime('%Y-%m-%d %H:%M:%S')}] {code} 获取信号失败: {report}"
-                        print(error_msg)
+                        logger.error(error_msg)
                         if enable_feishu and FEISHU_ENABLED:
                             send_to_lark(error_msg, is_error=True)
                         continue
@@ -148,47 +169,67 @@ def main() -> int:
                     )
 
                     # 判断是否需要打印
-                    if use_t_signal:
-                        # 做T信号：打印所有操作建议（做T买入/做T卖出/加仓/减仓）
-                        should_print = signal in ("做T买入", "做T卖出", "加仓", "减仓")
+                    if print_all_signals:
+                        # 打印所有信号（包括"暂不操作"）
+                        should_print = True
+                    elif use_t_signal:
+                        # 新版AI指令：只打印"立即买入"和"立即卖出"
+                        should_print = signal in ("立即买入", "立即卖出")
                     else:
                         # 标准信号：只打印买入/卖出
                         should_print = signal in ("买入", "卖出")
                         if print_bias and signal in ("偏买入", "偏卖出"):
                             should_print = True
 
-                    should_print = True
                     # 只在"信号变化"时打印
                     if should_print and last_printed.get(code) != signal:
                         last_printed[code] = signal
 
-                        # 根据信号类型生成不同的消息标签
+                        # 新版输出格式（简洁明确）
                         if use_t_signal and enable_deepseek:
-                            strategy_label = "AI 做T策略"
+                            # 根据信号类型选择 emoji
+                            if signal == "立即卖出":
+                                action_emoji = "🔴 卖出"
+                            elif signal == "立即买入":
+                                action_emoji = "🟢 买入"
+                            else:  # 暂不操作
+                                action_emoji = "⚪ 观望"
+
+                            exec_price = _extract_field(report, "执行价格") or "N/A"
+                            size = _extract_field(report, "建议数量") or "N/A"
+                            stop_loss = _extract_field(report, "止损价格") or "N/A"
+                            target = _extract_field(report, "目标价格") or "N/A"
+
+                            msg = (
+                                f"\n{'='*50}\n"
+                                f"⏰ {now_bj.strftime('%H:%M:%S')}  |  {code}\n"
+                                f"{'='*50}\n"
+                                f"{action_emoji}  【{signal}】\n"
+                                f"{'─'*50}\n"
+                                f"💰 执行价格: {exec_price}\n"
+                                f"📊 建议数量: {size}\n"
+                                f"🛡️ 止损价格: {stop_loss}\n"
+                                f"🎯 目标价格: {target}\n"
+                                f"{'─'*50}\n"
+                                f"💡 原因: {reason}\n"
+                                f"{'='*50}\n"
+                            )
                         else:
+                            # 标准策略保持原格式
                             strategy_label = "规则策略"
-
-                        msg = (
-                            f"[{now_bj.strftime('%Y-%m-%d %H:%M:%S')}] "
-                            f"{code} {rt_date}\n【{strategy_label}】信号={signal}\n理由={reason}"
-                        )
-
-                        # 如果是做T信号，增加目标位和止损位信息
-                        if use_t_signal and enable_deepseek:
-                            target = _extract_field(report, "目标价位") or "N/A"
-                            stop_loss = _extract_field(report, "止损价位") or "N/A"
-                            size = _extract_field(report, "建议操作量") or "N/A"
-                            msg += (
-                                f"\n操作量={size}\n目标位={target} | 止损位={stop_loss}"
+                            msg = (
+                                f"[{now_bj.strftime('%Y-%m-%d %H:%M:%S')}] "
+                                f"{code} {rt_date}\n【{strategy_label}】信号={signal}\n理由={reason}"
                             )
 
-                        print(msg)
+                        # 输出到日志
+                        logger.info(msg)
 
                         # AI 辅助分析（仅在非做T模式下，或做T模式但未启用 DeepSeek 时）
                         ai_msg = ""
                         if enable_deepseek and not use_t_signal:
                             try:
-                                print(f"  -> 正在调用 DeepSeek AI 辅助分析...")
+                                logger.info(f"  -> 正在调用 DeepSeek AI 辅助分析...")
                                 ai_report = deepseek_trade_signal(code=code)
                                 ai_signal = (
                                     _extract_field(ai_report, "AI 信号") or "未知"
@@ -204,25 +245,25 @@ def main() -> int:
                                     f"理由={ai_reason}\n"
                                     f"止损位={ai_stop_loss} | 目标位={ai_target}"
                                 )
-                                print(f"AI建议: {ai_msg}")
+                                logger.info(f"AI建议: {ai_msg}")
 
                                 # 信号一致性检查
                                 if signal in ("买入", "卖出") and ai_signal == signal:
                                     consistency_msg = (
                                         f"\n✅ 规则策略与 AI 信号一致！置信度更高"
                                     )
-                                    print(consistency_msg)
+                                    logger.info(consistency_msg)
                                     ai_msg += consistency_msg
                                 elif signal in ("买入", "卖出") and ai_signal != signal:
                                     conflict_msg = (
                                         f"\n⚠️ 规则策略与 AI 信号不一致，建议谨慎决策"
                                     )
-                                    print(conflict_msg)
+                                    logger.warning(conflict_msg)
                                     ai_msg += conflict_msg
 
                             except Exception as e:
                                 ai_error = f"\n[DeepSeek AI 调用失败: {e}]"
-                                print(ai_error)
+                                logger.error(ai_error)
                                 ai_msg = ai_error
 
                         # 发送飞书通知（包含 AI 分析，如果有）
@@ -232,7 +273,7 @@ def main() -> int:
 
                 except Exception as e:
                     error_msg = f"[{now_bj.strftime('%Y-%m-%d %H:%M:%S')}] {code} 获取信号失败: {e}"
-                    print(error_msg)
+                    logger.error(error_msg)
 
                     # 错误也发飞书（可选）
                     if enable_feishu and FEISHU_ENABLED:

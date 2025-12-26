@@ -327,7 +327,7 @@ def main() -> int:
     # 示例：股票 / ETF 都支持
     CODES = ["159218", "159840"]
     CODES_FILE = ""  # 可选：代码文件路径（每行一个，支持 .SZ/.SH），例如 "codes.txt"
-    LIMIT = 120  # 每个代码拉取的日线条数（默认 120）
+    LIMIT = 1  # 每个代码拉取的日线条数（默认 120）
     SLEEP_SECONDS = 0.2  # 每个代码请求间隔秒数（默认 0.2）
 
     codes: list[str] = []

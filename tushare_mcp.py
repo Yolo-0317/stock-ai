@@ -1026,7 +1026,46 @@ def deepseek_intraday_t_signal(
         y_close = float(prev_row["close"])
         pct_chg = (rt_close - y_close) / y_close * 100 if y_close else None
 
-        # 4) 计算盘中关键位置
+        # 4) 读取今天的分钟线数据（如果有）
+        intraday_bars = []
+        try:
+            from sqlalchemy import create_engine, text
+
+            # 获取 MySQL URL
+            MYSQL_URL = mysql_url or os.getenv("MYSQL_URL")
+            if not MYSQL_URL:
+                raise ValueError("未配置 MYSQL_URL")
+
+            # 创建数据库引擎
+            engine = create_engine(MYSQL_URL)
+
+            with engine.connect() as conn:
+                sql = text(
+                    """
+                    SELECT bar_time, open, high, low, close, vol, pct_chg
+                    FROM stock_intraday_snapshot
+                    WHERE ts_code = :code AND DATE(bar_time) = :date
+                    ORDER BY bar_time
+                """
+                )
+                result = conn.execute(sql, {"code": code6, "date": rt_date})
+                for row in result:
+                    intraday_bars.append(
+                        {
+                            "time": row[0].strftime("%H:%M"),
+                            "open": float(row[1]),
+                            "high": float(row[2]),
+                            "low": float(row[3]),
+                            "close": float(row[4]),
+                            "vol": int(row[5]),
+                            "pct_chg": float(row[6]) if row[6] else 0,
+                        }
+                    )
+        except Exception as e:
+            # 读取失败不影响主流程，只是没有分钟线数据而已
+            intraday_bars = []
+
+        # 5) 计算盘中关键位置
         # 日内振幅
         intraday_range = ((rt_high - rt_low) / y_close * 100) if y_close else 0
         # 当前价格在日内区间的位置（0-1，0.5表示中轴）
@@ -1036,7 +1075,7 @@ def deepseek_intraday_t_signal(
         # 相对昨收的位置
         vs_pre_close = ((rt_close - y_close) / y_close * 100) if y_close else 0
 
-        # 5) 构建专门用于做T的 prompt
+        # 6) 构建专门用于做T的 prompt
         prompt = _build_intraday_t_prompt(
             code=code6,
             hist_df=df.tail(10),  # 只取最近10天，减少token消耗
@@ -1060,6 +1099,7 @@ def deepseek_intraday_t_signal(
                 "cost": position_cost,
                 "ratio": position_ratio,
             },
+            intraday_bars=intraday_bars,  # 传入分钟线数据
         )
 
         # 6) 调用 DeepSeek API
@@ -1080,32 +1120,41 @@ def deepseek_intraday_t_signal(
         if position_ratio > 0:
             position_info_str += f"\n- **当前仓位**: {position_ratio:.1%}"
 
+        # 分钟线数据说明
+        intraday_info = ""
+        if intraday_bars:
+            intraday_info = f"\n- **日内分析**: 已参考 {len(intraday_bars)} 条分钟数据"
+
+        # 根据AI指令生成明确的操作建议
+        action = parsed["action"]
+        action_emoji = (
+            "🔴" if action == "立即卖出" else ("🟢" if action == "立即买入" else "⚪")
+        )
+
         report = f"""
-### DeepSeek AI 盘中做T信号: {code6}
-- **盘中日期**: {rt_date}
-- **今开/当前/最高/最低**: {rt_open} / {rt_close} / {rt_high} / {rt_low}
-- **日内振幅**: {intraday_range:.2f}% (当前位于日内区间 {position_in_range:.1%} 位置)
-- **涨跌幅(相对昨收)**: {pct_str}
-- **技术指标**: MA5={ma5:.4f}, MA20={ma20:.4f}{position_info_str}
+        ### {action_emoji} AI 操作指令: {code6}
+        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        📊 **当前行情** ({rt_date})
+        当前价: {rt_close}  |  涨跌: {pct_str}
+        日内区间: {rt_low} ~ {rt_high} (当前位于 {position_in_range:.0%} 位置)
+        技术指标: MA5={ma5:.4f}, MA20={ma20:.4f}{position_info_str}{intraday_info}
 
----
+        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        🎯 **操作指令**: {action}
 
-- **AI 操作建议**: {parsed['action']}
-- **核心理由**: {parsed['reason']}
-- **建议操作量**: {parsed['size']}
-- **目标价位**: {parsed['target']}
-- **止损价位**: {parsed['stop_loss']}
+        📍 执行价格: {parsed['price']}
+        📊 建议数量: {parsed['size']}
+        🛡️ 止损价格: {parsed['stop_loss']}
+        🎁 目标价格: {parsed['target']}
 
----
+        💡 核心原因: {parsed['reason']}
+        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-**AI 完整分析**:
-{parsed['raw']}
-
-**提示**:
-- 做T操作需快进快出，严格止损
-- 建议单次操作量不超过总仓位的 20-30%
-- 盘中波动剧烈时，优先保本，不强求盈利
-"""
+        📋 **AI 完整分析**：
+        {parsed['raw']}
+        
+        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        """
         return report
 
     except Exception as e:
@@ -1113,7 +1162,11 @@ def deepseek_intraday_t_signal(
 
 
 def _build_intraday_t_prompt(
-    code: str, hist_df: pd.DataFrame, current_data: dict, position_info: dict
+    code: str,
+    hist_df: pd.DataFrame,
+    current_data: dict,
+    position_info: dict,
+    intraday_bars: list = None,
 ) -> str:
     """
     构建专门用于盘中做T的 prompt。
@@ -1132,6 +1185,24 @@ def _build_intraday_t_prompt(
         )
     hist_table = "\n".join(hist_lines)
 
+    # 分钟线数据表格（如果有）
+    intraday_table = ""
+    if intraday_bars and len(intraday_bars) > 0:
+        # 只展示最近 30 条，避免 token 过多
+        recent_bars = intraday_bars[-30:] if len(intraday_bars) > 30 else intraday_bars
+        bar_lines = ["时间 | 开盘 | 最高 | 最低 | 收盘 | 成交量(手) | 涨跌%"]
+        bar_lines.append("--- | --- | --- | --- | --- | --- | ---")
+        for bar in recent_bars:
+            # 成交量转换为手（1手=100股）
+            vol_lots = bar["vol"] // 100 if bar["vol"] > 0 else 0
+            bar_lines.append(
+                f"{bar['time']} | {bar['open']:.3f} | {bar['high']:.3f} | "
+                f"{bar['low']:.3f} | {bar['close']:.3f} | {vol_lots:,} | {bar['pct_chg']:.2f}%"
+            )
+        intraday_table = "\n".join(bar_lines)
+    else:
+        intraday_table = "暂无分钟线数据（可能尚未采集或盘前时段）"
+
     position_text = ""
     if position_info.get("cost"):
         profit = (
@@ -1140,122 +1211,118 @@ def _build_intraday_t_prompt(
             * 100
         )
         position_text = f"""
-## 当前持仓
-- **成本价**: {position_info['cost']:.3f}
-- **当前仓位**: {position_info['ratio']:.1%}
-- **浮动盈亏**: {profit:+.2f}%
-"""
+        ## 当前持仓
+        - **成本价**: {position_info['cost']:.3f}
+        - **当前仓位**: {position_info['ratio']:.1%}
+        - **浮动盈亏**: {profit:+.2f}%
+        """
 
     prompt = f"""
-你是一个盘中交易专家，擅长日内波段操作（做T）。请分析 **{code}** 的盘中做T机会。
+        你是一个盘中交易助手，给出简单明确的操作指令。
 
-## 历史日线（最近 10 天）
-{hist_table}
+        ## 历史行情（最近 10 天）
+        {hist_table}
 
-## 当前盘中实时数据
-- **日期**: {current_data['date']}
-- **今开**: {current_data['open']}
-- **当前价**: {current_data['close']}
-- **最高**: {current_data['high']}
-- **最低**: {current_data['low']}
-- **日内振幅**: {current_data['intraday_range']}
-- **当前位于日内区间**: {current_data['position_in_range']} (0%=最低点, 100%=最高点)
-- **涨跌幅(相对昨收)**: {current_data['pct_chg']}
-- **MA5**: {current_data['ma5']:.4f}
-- **MA20**: {current_data['ma20']:.4f}
-- **昨收**: {current_data['pre_close']}
-{position_text}
+        ## 当前盘中实时数据
+        - **日期**: {current_data['date']}
+        - **当前价**: {current_data['close']}
+        - **今开**: {current_data['open']}
+        - **最高/最低**: {current_data['high']} / {current_data['low']}
+        - **日内位置**: {current_data['position_in_range']} (0%=最低, 100%=最高)
+        - **涨跌幅**: {current_data['pct_chg']}
+        - **MA5**: {current_data['ma5']:.4f}
+        - **MA20**: {current_data['ma20']:.4f}
+        - **昨收**: {current_data['pre_close']}
+        {position_text}
 
-## 分析要求（重点关注盘中做T机会）
+        ## 日内分钟线走势（最近 30 分钟）
+        {intraday_table}
 
-1. **判断当前位置**：是处于日内低点（适合买入）、高点（适合卖出）、还是中继整理？
-2. **支撑/压力位**：基于昨收、今开、均线、日内高低点，给出关键价位
-3. **操作建议**：从以下选择一个
-   - **做T买入**：盘中回调到支撑位，适合低吸（短线持有，目标快速上涨后卖出）
-   - **做T卖出**：盘中拉升到压力位，适合高抛（已有持仓时）
-   - **加仓**：趋势向上且位置不高，可增加底仓（中长线持有）
-   - **减仓**：涨幅较大或趋势转弱，适合降低仓位
-   - **持仓不动**：震荡整理，暂无明确方向
-4. **操作量建议**：轻仓试探 / 标准仓位 / 重仓（考虑当前仓位比例）
-5. **目标价位**：做T的目标卖出价（买入时）或回补价（卖出时）
-6. **止损价位**：快进快出，止损要严格
+        ## 任务要求
 
-## 回答格式（严格按以下格式输出）
-操作建议: [做T买入/做T卖出/加仓/减仓/持仓不动]
-核心理由: [简明理由，3条以内]
-建议操作量: [轻仓试探10-20% / 标准仓位20-30% / 重仓30-50%]
-目标价位: [具体价格]
-止损价位: [具体价格]
-"""
+        **请结合历史日线、当前实时数据和日内分钟线走势**，分析以下要点：
+        1. **日内趋势**：是持续上涨/下跌还是震荡反复？价格运行轨迹如何？
+        2. **量价关系**：上涨/下跌时成交量如何变化？是否健康？
+        3. **当前位置**：是第一次冲高还是反复测试？支撑/压力是否有效？
+        4. **多空力量**：买盘强还是卖盘强？是否有明显的多空转换信号？
+
+        基于以上综合分析，给出**当前时刻是否应该立即操作**的明确建议。
+
+        **只从以下3个指令中选择1个**：
+        1. **立即买入** - 现在就是好的买点（回调到支撑、突破确认、多头力量强等）
+        2. **立即卖出** - 现在就是好的卖点（冲高到压力、趋势转弱、空头力量强等）
+        3. **暂不操作** - 位置不佳或方向不明，等待更好时机
+
+        **输出格式（严格按此格式）**：
+
+        首先进行详细分析：
+        日内趋势分析: [描述分钟线走势特征，2-3句话]
+        量价配合: [分析成交量变化，1-2句话]
+        关键位置: [当前支撑/压力位，1-2句话]
+
+        然后给出操作建议（每行一个字段）：
+        操作指令: [立即买入/立即卖出/暂不操作]
+        执行价格: [当前价附近的具体价格，如 0.869]
+        建议数量: [具体占总资金的比例，如 20%]
+        止损价格: [具体价格]
+        目标价格: [具体价格]
+        核心原因: [综合上述分析的一句话结论，不超过50字]
+        """
     return prompt
 
 
 def _parse_intraday_t_response(response: str) -> dict:
     """
-    解析 DeepSeek 盘中做T信号。
+    解析 DeepSeek 盘中做T信号（简化版）。
     """
     result = {
-        "action": "未知",
-        "reason": "",
-        "size": "标准仓位",
-        "target": "N/A",
+        "action": "暂不操作",
+        "price": "N/A",
+        "size": "N/A",
         "stop_loss": "N/A",
+        "target": "N/A",
+        "reason": "",
         "raw": response,
     }
 
     lines = response.strip().split("\n")
-    current_field = None
-    reason_lines = []
 
     for line in lines:
         line_stripped = line.strip()
 
-        if line_stripped.startswith("操作建议:") or line_stripped.startswith(
-            "操作建议："
+        # 匹配新的字段格式
+        if line_stripped.startswith("操作指令:") or line_stripped.startswith(
+            "操作指令："
         ):
             result["action"] = (
                 line_stripped.split(":", 1)[-1].split("：", 1)[-1].strip()
             )
-            current_field = None
-        elif line_stripped.startswith("核心理由:") or line_stripped.startswith(
-            "核心理由："
+        elif line_stripped.startswith("执行价格:") or line_stripped.startswith(
+            "执行价格："
         ):
-            # 提取第一行理由
-            first_line_reason = (
-                line_stripped.split(":", 1)[-1].split("：", 1)[-1].strip()
-            )
-            if first_line_reason:
-                reason_lines = [first_line_reason]
-            current_field = "reason"
-        elif line_stripped.startswith("建议操作量:") or line_stripped.startswith(
-            "建议操作量："
+            result["price"] = line_stripped.split(":", 1)[-1].split("：", 1)[-1].strip()
+        elif line_stripped.startswith("建议数量:") or line_stripped.startswith(
+            "建议数量："
         ):
             result["size"] = line_stripped.split(":", 1)[-1].split("：", 1)[-1].strip()
-            current_field = None
-        elif line_stripped.startswith("目标价位:") or line_stripped.startswith(
-            "目标价位："
-        ):
-            result["target"] = (
-                line_stripped.split(":", 1)[-1].split("：", 1)[-1].strip()
-            )
-            current_field = None
-        elif line_stripped.startswith("止损价位:") or line_stripped.startswith(
-            "止损价位："
+        elif line_stripped.startswith("止损价格:") or line_stripped.startswith(
+            "止损价格："
         ):
             result["stop_loss"] = (
                 line_stripped.split(":", 1)[-1].split("：", 1)[-1].strip()
             )
-            current_field = None
-        elif current_field == "reason" and line_stripped:
-            # 继续收集多行理由（以数字或符号开头的）
-            if line_stripped[0].isdigit() or line_stripped.startswith(
-                ("1.", "2.", "3.", "-", "•")
-            ):
-                reason_lines.append(line_stripped)
-
-    # 合并多行理由
-    if reason_lines:
-        result["reason"] = "; ".join(reason_lines)
+        elif line_stripped.startswith("目标价格:") or line_stripped.startswith(
+            "目标价格："
+        ):
+            result["target"] = (
+                line_stripped.split(":", 1)[-1].split("：", 1)[-1].strip()
+            )
+        elif line_stripped.startswith("核心原因:") or line_stripped.startswith(
+            "核心原因："
+        ):
+            result["reason"] = (
+                line_stripped.split(":", 1)[-1].split("：", 1)[-1].strip()
+            )
 
     return result
 

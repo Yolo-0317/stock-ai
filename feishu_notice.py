@@ -3,6 +3,12 @@ import time
 
 import requests
 
+# 导入日志配置
+from logger_config import get_logger
+
+# 获取 logger（与 monitor 脚本共享同一个 logger）
+logger = get_logger("monitor")
+
 # 自己的测试机器人
 FEISHU_BOT_URL = (
     "https://open.feishu.cn/open-apis/bot/v2/hook/6ae3c4bc-a50e-49dc-b75d-fa9a217b2299"
@@ -27,7 +33,7 @@ def send_to_lark(
     Returns:
         bool: 发送成功返回 True，失败返回 False
     """
-    print(f"给 Lark 机器人发送推送: {message}")
+    logger.debug(f"给 Lark 机器人发送推送")
 
     # 格式化消息
     formatted_message = f"{NOTIFY_MSG_ENV_PREFIX}\n{message}"
@@ -63,14 +69,14 @@ def send_to_lark(
             if response.status_code == 200 and response_obj.get("StatusCode") == 0:
                 return True
             else:
-                error_message = f"{formatted_message}发送失败，状态码: {response.text}"
-                print(error_message)
+                error_message = f"飞书通知发送失败，状态码: {response.text}"
+                logger.warning(error_message)
         except Exception as e:
-            print(f"{formatted_message}发送异常: {e}")
+            logger.error(f"飞书通知发送异常: {e}")
 
         # 如果不是最后一次尝试，等待后重试
         if attempt < retry_count:
-            print(f"等待 {retry_delay} 秒后重试，(第{attempt + 1}次尝试)")
+            logger.info(f"等待 {retry_delay} 秒后重试，(第{attempt + 1}次尝试)")
             time.sleep(retry_delay)
         else:
             break
@@ -81,5 +87,5 @@ def send_to_lark(
         send_to_lark(f"{message}重试失败", is_error=True)
     else:
         # 发送失败消息失败，不重试
-        print(f"【失败消息】{formatted_message}发送失败，错误消息不重试")
+        logger.error(f"【失败消息】飞书通知发送失败，错误消息不重试")
     return False
