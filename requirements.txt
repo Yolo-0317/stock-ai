@@ -1,0 +1,6 @@
+tushare
+pandas
+mcp
+requests
+sqlalchemy
+pymysql
