@@ -33,6 +33,15 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _bootstrap import ensure_repo_root_on_path
+
+ensure_repo_root_on_path()
 
 from ingest_eastmoney_daily_to_mysql import (
     DEFAULT_MYSQL_URL,
@@ -62,6 +71,7 @@ class PollConfig:
     interval_seconds: float
     per_code_sleep_seconds: float
     once: bool
+    all_day: bool
 
 
 def build_snapshot_table(metadata: MetaData) -> Table:
@@ -115,6 +125,49 @@ def _beijing_now_minute() -> datetime:
     now_utc = datetime.now(timezone.utc)
     bj = now_utc + timedelta(hours=8)
     return bj.replace(second=0, microsecond=0, tzinfo=None)
+
+
+def _beijing_now() -> datetime:
+    """获取北京时间（不带时区信息，便于比较）。"""
+    now_utc = datetime.now(timezone.utc)
+    bj = now_utc + timedelta(hours=8)
+    return bj.replace(tzinfo=None)
+
+
+def _is_trading_time_bj(dt: datetime) -> bool:
+    """A 股交易时段（北京时间）：9:30-11:30，13:00-15:00。"""
+    t = dt.time()
+    am = (t.hour > 9 or (t.hour == 9 and t.minute >= 30)) and (
+        t.hour < 11 or (t.hour == 11 and t.minute <= 30)
+    )
+    pm = (t.hour > 13 or (t.hour == 13 and t.minute >= 0)) and (
+        t.hour < 15 or (t.hour == 15 and t.minute <= 0)
+    )
+    return am or pm
+
+
+def _seconds_until_next_trading_window(now_bj: datetime) -> float:
+    """非交易时段：计算距离下一次交易窗口开始的秒数（不处理节假日，足够日常使用）。"""
+    today = now_bj.date()
+
+    def at(h: int, m: int) -> datetime:
+        return datetime(today.year, today.month, today.day, h, m)
+
+    start_am = at(9, 30)
+    start_pm = at(13, 0)
+    end_am = at(11, 30)
+    end_pm = at(15, 0)
+
+    if now_bj < start_am:
+        return max(1.0, (start_am - now_bj).total_seconds())
+    if end_am < now_bj < start_pm:
+        return max(1.0, (start_pm - now_bj).total_seconds())
+    if now_bj > end_pm:
+        next_day = today + timedelta(days=1)
+        next_start = datetime(next_day.year, next_day.month, next_day.day, 9, 30)
+        return max(1.0, (next_start - now_bj).total_seconds())
+
+    return 60.0
 
 
 def _upsert_snapshot(conn, table: Table, code: str) -> None:
@@ -189,10 +242,11 @@ def main() -> int:
     # 配置区：按需修改即可
     # =========================
     MYSQL_URL = os.getenv("MYSQL_URL") or DEFAULT_MYSQL_URL
-    CODES = ["159218", "159840"]  # 支持 '159840' / '159840.SZ' 等
+    CODES = ["159218", "159840", "512400"]  # 支持 '159840' / '159840.SZ' 等
     INTERVAL_SECONDS = 60.0  # 每轮间隔秒数（默认 60 秒）
     PER_CODE_SLEEP_SECONDS = 0.2  # 每个 code 请求后的 sleep（默认 0.2 秒）
     ONCE = False  # True：只跑一轮就退出（适合 cron）；False：常驻轮询
+    ALL_DAY = False  # True：全天抓取；False：仅交易时段抓取（推荐）
 
     cfg = PollConfig(
         mysql_url=MYSQL_URL,
@@ -200,14 +254,31 @@ def main() -> int:
         interval_seconds=INTERVAL_SECONDS,
         per_code_sleep_seconds=PER_CODE_SLEEP_SECONDS,
         once=ONCE,
+        all_day=ALL_DAY,
     )
     if cfg.once:
+        if not cfg.all_day:
+            now_bj = _beijing_now()
+            if not _is_trading_time_bj(now_bj):
+                print(
+                    f"非交易时段（{now_bj.strftime('%Y-%m-%d %H:%M:%S')}），跳过本次抓取（ONCE=True）。"
+                )
+                return 0
         _poll_once(cfg)
         return 0
 
     print(f"开始轮询快照：codes={cfg.codes} interval={cfg.interval_seconds}s")
     while True:
         start = time.time()
+        if not cfg.all_day:
+            now_bj = _beijing_now()
+            if not _is_trading_time_bj(now_bj):
+                sleep_s = _seconds_until_next_trading_window(now_bj)
+                print(
+                    f"非交易时段（{now_bj.strftime('%Y-%m-%d %H:%M:%S')}），休眠 {int(sleep_s)}s..."
+                )
+                time.sleep(sleep_s)
+                continue
         _poll_once(cfg)
         cost = time.time() - start
         time.sleep(max(0.0, cfg.interval_seconds - cost))

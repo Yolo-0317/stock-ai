@@ -61,7 +61,7 @@ POSITION_RATIOS = {
 **手动运行：**
 ```bash
 cd /Users/huan.yu/dev/demo/stock/tushare-mcp
-uv run python run_premarket_analysis.py
+uv run python scripts/run_premarket_analysis.py
 ```
 
 **查看内容：**
@@ -96,7 +96,7 @@ uv run python run_premarket_analysis.py
 **启动监控：**
 ```bash
 cd /Users/huan.yu/dev/demo/stock/tushare-mcp
-uv run python monitor_intraday_signals.py
+uv run python scripts/monitor_intraday_signals.py
 ```
 
 **监控内容：**
@@ -140,7 +140,7 @@ enable_feishu = True         # 启用飞书通知（盘中实时推送）
 **手动运行：**
 ```bash
 cd /Users/huan.yu/dev/demo/stock/tushare-mcp
-uv run python run_aftermarket_analysis.py
+uv run python scripts/run_aftermarket_analysis.py
 ```
 
 **查看内容：**
@@ -190,7 +190,7 @@ cat > ~/Library/LaunchAgents/com.stock.premarket.plist << 'EOF'
         <string>/Users/huan.yu/.local/bin/uv</string>
         <string>run</string>
         <string>python</string>
-        <string>run_premarket_analysis.py</string>
+        <string>scripts/run_premarket_analysis.py</string>
     </array>
     <key>WorkingDirectory</key>
     <string>/Users/huan.yu/dev/demo/stock/tushare-mcp</string>
@@ -229,7 +229,7 @@ cat > ~/Library/LaunchAgents/com.stock.aftermarket.plist << 'EOF'
         <string>/Users/huan.yu/.local/bin/uv</string>
         <string>run</string>
         <string>python</string>
-        <string>run_aftermarket_analysis.py</string>
+        <string>scripts/run_aftermarket_analysis.py</string>
     </array>
     <key>WorkingDirectory</key>
     <string>/Users/huan.yu/dev/demo/stock/tushare-mcp</string>
@@ -381,7 +381,7 @@ cat logs/premarket.err.log
 cat logs/aftermarket.err.log
 
 # 手动测试
-uv run python run_premarket_analysis.py
+uv run python scripts/run_premarket_analysis.py
 ```
 
 ---

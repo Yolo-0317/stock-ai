@@ -29,6 +29,16 @@ import argparse
 import os
 import time
 from dataclasses import dataclass
+from pathlib import Path
+from datetime import datetime, timedelta, timezone
+
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _bootstrap import ensure_repo_root_on_path
+
+ensure_repo_root_on_path()
 
 from sqlalchemy import MetaData, create_engine, text
 from sqlalchemy.dialects.mysql import insert
@@ -48,6 +58,7 @@ class PollConfig:
     interval_seconds: float
     per_code_sleep_seconds: float
     once: bool
+    all_day: bool
 
 
 def _infer_exch_code(code6: str) -> str:
@@ -60,6 +71,51 @@ def _infer_exch_code(code6: str) -> str:
         return "BJ"
     # 其它默认深市（含深市 ETF 159xxx）
     return "SZ"
+
+
+def _beijing_now() -> datetime:
+    """获取北京时间（不带时区信息，便于比较）。"""
+    now_utc = datetime.now(timezone.utc)
+    bj = now_utc + timedelta(hours=8)
+    return bj.replace(tzinfo=None)
+
+
+def _is_trading_time_bj(dt: datetime) -> bool:
+    """A 股交易时段（北京时间）：9:30-11:30，13:00-15:00。"""
+    t = dt.time()
+    am = (t.hour > 9 or (t.hour == 9 and t.minute >= 30)) and (
+        t.hour < 11 or (t.hour == 11 and t.minute <= 30)
+    )
+    pm = (t.hour > 13 or (t.hour == 13 and t.minute >= 0)) and (
+        t.hour < 15 or (t.hour == 15 and t.minute <= 0)
+    )
+    return am or pm
+
+
+def _seconds_until_next_trading_window(now_bj: datetime) -> float:
+    """非交易时段：计算距离下一次交易窗口开始的秒数（不处理节假日，足够日常使用）。"""
+    today = now_bj.date()
+    t = now_bj.time()
+
+    def at(h: int, m: int) -> datetime:
+        return datetime(today.year, today.month, today.day, h, m)
+
+    start_am = at(9, 30)
+    start_pm = at(13, 0)
+    end_am = at(11, 30)
+    end_pm = at(15, 0)
+
+    if now_bj < start_am:
+        return max(1.0, (start_am - now_bj).total_seconds())
+    if end_am < now_bj < start_pm:
+        return max(1.0, (start_pm - now_bj).total_seconds())
+    if now_bj > end_pm:
+        next_day = today + timedelta(days=1)
+        next_start = datetime(next_day.year, next_day.month, next_day.day, 9, 30)
+        return max(1.0, (next_start - now_bj).total_seconds())
+
+    # 兜底：如果恰好在边界附近
+    return 60.0
 
 
 def _get_prev_close(conn, code6: str, trade_date: str) -> float | None:
@@ -203,6 +259,11 @@ def _parse_args() -> PollConfig:
         action="store_true",
         help="只执行一次（适合 cron）；不传则常驻轮询",
     )
+    parser.add_argument(
+        "--all-day",
+        action="store_true",
+        help="全天运行（默认仅交易时段抓取，非交易时段会跳过/休眠）",
+    )
 
     args = parser.parse_args()
     codes = [c.strip() for c in str(args.codes).split(",") if c.strip()]
@@ -215,11 +276,26 @@ def _parse_args() -> PollConfig:
         interval_seconds=float(args.interval),
         per_code_sleep_seconds=float(args.per_code_sleep),
         once=bool(args.once),
+        all_day=bool(args.all_day),
     )
 
 
 def main() -> int:
     cfg = _parse_args()
+    if not cfg.all_day:
+        now_bj = _beijing_now()
+        if not _is_trading_time_bj(now_bj):
+            if cfg.once:
+                print(
+                    f"非交易时段（{now_bj.strftime('%Y-%m-%d %H:%M:%S')}），跳过本次抓取（--once）。"
+                )
+                return 0
+            sleep_s = _seconds_until_next_trading_window(now_bj)
+            print(
+                f"非交易时段（{now_bj.strftime('%Y-%m-%d %H:%M:%S')}），休眠 {int(sleep_s)}s 等待下一交易窗口..."
+            )
+            time.sleep(sleep_s)
+
     if cfg.once:
         _poll_once(cfg)
         return 0
@@ -229,6 +305,15 @@ def main() -> int:
     )
     while True:
         start = time.time()
+        if not cfg.all_day:
+            now_bj = _beijing_now()
+            if not _is_trading_time_bj(now_bj):
+                sleep_s = _seconds_until_next_trading_window(now_bj)
+                print(
+                    f"非交易时段（{now_bj.strftime('%Y-%m-%d %H:%M:%S')}），休眠 {int(sleep_s)}s..."
+                )
+                time.sleep(sleep_s)
+                continue
         _poll_once(cfg)
         cost = time.time() - start
         sleep_s = max(0.0, cfg.interval_seconds - cost)

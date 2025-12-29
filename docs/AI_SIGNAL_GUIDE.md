@@ -73,7 +73,7 @@ AI 现在只给你**3种简单明确的指令**：
 cd /Users/huan.yu/dev/demo/stock/tushare-mcp
 
 # 运行监控（会自动加载 .env 配置）
-uv run python monitor_intraday_signals.py
+uv run python scripts/monitor_intraday_signals.py
 ```
 
 **配置说明**（在 `monitor_intraday_signals.py` 的 `main()` 函数中）：
@@ -107,7 +107,7 @@ use_t_signal = True       # 是否使用简化指令模式
 cd /Users/huan.yu/dev/demo/stock/tushare-mcp
 
 # 运行测试脚本
-uv run python test_ai_signal_now.py
+uv run python tests/manual/test_ai_signal_now.py
 ```
 
 或者直接调用：
@@ -213,7 +213,7 @@ MYSQL_URL=mysql+pymysql://user:pass@localhost:3306/stock_data
 cat /Users/huan.yu/dev/demo/stock/tushare-mcp/.env | grep DEEPSEEK_API_KEY
 
 # 测试 API 连接
-uv run python test_ai_signal_now.py
+uv run python tests/manual/test_ai_signal_now.py
 ```
 
 ### 问题 3：飞书通知不工作

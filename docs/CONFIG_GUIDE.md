@@ -189,7 +189,7 @@ uv run python -c "from tushare_mcp import deepseek_intraday_t_signal; print(deep
 
 ```bash
 # 默认模式（只打印买入/卖出）
-uv run python monitor_intraday_signals.py
+uv run python scripts/monitor_intraday_signals.py
 
 # 如果需要看所有信号，先修改配置后再运行
 ```

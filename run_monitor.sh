@@ -34,5 +34,5 @@ echo ""
 
 # 4. 启动监控
 echo "正在启动盯盘监控..."
-uv run python monitor_intraday_signals.py
+uv run python scripts/monitor_intraday_signals.py
 

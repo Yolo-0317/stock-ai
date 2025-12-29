@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-盘后分析脚本 - 每日收盘后运行
+盘前分析脚本 - 每日开盘前运行
 
-建议运行时间：每个交易日 15:30 - 16:00
+建议运行时间：每个交易日 8:30 - 9:00
 """
 
 import logging
 import os
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _bootstrap import ensure_repo_root_on_path
+
+ensure_repo_root_on_path()
 
 from dotenv import load_dotenv
 
@@ -19,50 +25,49 @@ load_dotenv(dotenv_path=env_path)
 
 from feishu_notice import send_to_lark
 from logger_config import setup_logging
+from code_names import code_label
 
 # 导入分析函数
-from tushare_mcp import deepseek_aftermarket_analysis
+from tushare_mcp import deepseek_premarket_analysis
 
 # 配置
-CODES = ["159218", "159840", "512400"]  # 关注的股票
+CODES = ["159218", "159840"]  # 关注的股票
 # 持仓成本
 POSITION_COSTS = {
     "159218": 1.197,
-    "512400": None,
     "159840": 0.869,
 }
 # 仓位比例
 POSITION_RATIOS = {
     "159218": 0.2374,
-    "512400": None,
     "159840": 0.1058,
 }
 
-# 是否发送飞书通知（盘后分析不需要推送，仅记录日志）
+# 是否发送飞书通知（盘前分析不需要推送，仅记录日志）
 ENABLE_FEISHU = False
 
 
 def main():
-    """执行盘后分析"""
+    """执行盘前分析"""
     # 初始化日志
     logger = setup_logging(
-        name="aftermarket",
+        name="premarket",
         log_level=logging.INFO,
         console_level=logging.INFO,
     )
 
     logger.info("=" * 60)
-    logger.info("🌙 开始执行盘后分析...")
+    logger.info("🌅 开始执行盘前分析...")
     logger.info("=" * 60)
 
     results = []
 
     for code in CODES:
-        logger.info(f"\n正在分析 {code}...")
+        logger.info(f"\n正在分析 {code_label(code)}...")
 
         try:
-            # 执行盘后分析
-            report = deepseek_aftermarket_analysis(
+            # 执行盘前分析
+            report = deepseek_premarket_analysis(
                 code=code,
                 position_cost=POSITION_COSTS.get(code),
                 position_ratio=POSITION_RATIOS.get(code, 0.0),
@@ -73,7 +78,7 @@ def main():
             results.append(report)
 
         except Exception as e:
-            error_msg = f"❌ {code} 盘后分析失败: {e}"
+            error_msg = f"❌ {code_label(code)} 盘前分析失败: {e}"
             logger.error(error_msg)
             results.append(error_msg)
 
@@ -87,7 +92,7 @@ def main():
             logger.error(f"\n❌ 发送飞书通知失败: {e}")
 
     logger.info("\n" + "=" * 60)
-    logger.info("✅ 盘后分析完成")
+    logger.info("✅ 盘前分析完成")
     logger.info("=" * 60)
 
     return 0

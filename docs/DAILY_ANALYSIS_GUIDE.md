@@ -35,7 +35,7 @@
 cd /Users/huan.yu/dev/demo/stock/tushare-mcp
 
 # 运行盘前分析
-uv run python run_premarket_analysis.py
+uv run python scripts/run_premarket_analysis.py
 ```
 
 #### 盘后分析
@@ -43,7 +43,7 @@ uv run python run_premarket_analysis.py
 cd /Users/huan.yu/dev/demo/stock/tushare-mcp
 
 # 运行盘后分析
-uv run python run_aftermarket_analysis.py
+uv run python scripts/run_aftermarket_analysis.py
 ```
 
 ### 2. 自动运行（定时任务）
@@ -64,7 +64,7 @@ cat > ~/Library/LaunchAgents/com.stock.premarket.plist << 'EOF'
         <string>/Users/huan.yu/.local/bin/uv</string>
         <string>run</string>
         <string>python</string>
-        <string>run_premarket_analysis.py</string>
+        <string>scripts/run_premarket_analysis.py</string>
     </array>
     <key>WorkingDirectory</key>
     <string>/Users/huan.yu/dev/demo/stock/tushare-mcp</string>
@@ -101,7 +101,7 @@ cat > ~/Library/LaunchAgents/com.stock.aftermarket.plist << 'EOF'
         <string>/Users/huan.yu/.local/bin/uv</string>
         <string>run</string>
         <string>python</string>
-        <string>run_aftermarket_analysis.py</string>
+        <string>scripts/run_aftermarket_analysis.py</string>
     </array>
     <key>WorkingDirectory</key>
     <string>/Users/huan.yu/dev/demo/stock/tushare-mcp</string>
@@ -298,7 +298,7 @@ cat logs/premarket.err.log
 cat logs/aftermarket.err.log
 
 # 手动执行测试
-uv run python run_premarket_analysis.py
+uv run python scripts/run_premarket_analysis.py
 ```
 
 ### 问题 2：API 调用失败

@@ -8,8 +8,17 @@
 示例：
 export DEEPSEEK_API_KEY="sk-xxx"
 export MYSQL_URL="mysql+pymysql://user:pass@localhost:3306/stock_data"
-python test_deepseek_signal.py
+uv run python tests/manual/test_deepseek_signal.py
 """
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _bootstrap import ensure_repo_root_on_path
+
+ensure_repo_root_on_path()
 
 from tushare_mcp import deepseek_trade_signal, intraday_trade_signal
 

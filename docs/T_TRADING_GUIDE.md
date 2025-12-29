@@ -37,7 +37,7 @@
 cd /Users/huan.yu/dev/demo/stock/tushare-mcp
 
 # 测试做T信号（会同时测试空仓和持仓两种场景）
-uv run python test_t_signal.py
+uv run python tests/manual/test_t_signal.py
 ```
 
 **输出示例**：
@@ -96,7 +96,7 @@ def main() -> int:
 
 运行监控：
 ```bash
-uv run python monitor_intraday_signals.py
+uv run python scripts/monitor_intraday_signals.py
 ```
 
 **预期输出**：

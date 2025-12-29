@@ -3,6 +3,15 @@
 快速测试当前AI操作指令
 """
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _bootstrap import ensure_repo_root_on_path
+
+ensure_repo_root_on_path()
+
 from tushare_mcp import deepseek_intraday_t_signal
 
 if __name__ == "__main__":

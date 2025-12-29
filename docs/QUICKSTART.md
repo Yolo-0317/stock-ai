@@ -32,10 +32,10 @@ CREATE DATABASE IF NOT EXISTS stock_data
 cd /Users/huan.yu/dev/demo/stock/tushare-mcp
 
 # 创建日线表
-mysql -u root -p stock_data < create_stock_daily_table.sql
+mysql -u root -p stock_data < sql/create_stock_daily_table.sql
 
 # （可选）创建分钟快照表
-mysql -u root -p stock_data < create_stock_intraday_snapshot_table.sql
+mysql -u root -p stock_data < sql/create_stock_intraday_snapshot_table.sql
 ```
 
 #### 1.3 补齐历史数据
@@ -44,7 +44,7 @@ mysql -u root -p stock_data < create_stock_intraday_snapshot_table.sql
 # 修改 run_monitor.sh 里的 MYSQL_URL
 # 然后运行：
 export MYSQL_URL="mysql+pymysql://root:your_password@localhost:3306/stock_data"
-uv run python ingest_eastmoney_daily_to_mysql.py
+uv run python scripts/ingest_eastmoney_daily_to_mysql.py
 ```
 
 这会拉取 159218 和 159840 的最近 120 天日线数据并入库。
@@ -110,7 +110,7 @@ DeepSeek AI 辅助分析已启用
 # 2. 设置环境变量并测试
 export DEEPSEEK_API_KEY="sk-your-key"
 export MYSQL_URL="mysql+pymysql://root:password@localhost:3306/stock_data"
-uv run python test_deepseek_signal.py
+uv run python tests/manual/test_deepseek_signal.py
 ```
 
 ---
@@ -130,7 +130,7 @@ export MYSQL_URL="mysql+pymysql://user:pass@localhost:3306/stock_data"
 **A**: 需要先补齐历史数据：
 
 ```bash
-uv run python ingest_eastmoney_daily_to_mysql.py
+uv run python scripts/ingest_eastmoney_daily_to_mysql.py
 ```
 
 ### Q3: 提示"ModuleNotFoundError: No module named 'mcp'"
@@ -138,7 +138,7 @@ uv run python ingest_eastmoney_daily_to_mysql.py
 **A**: 使用 `uv run` 而不是直接 `python`：
 
 ```bash
-uv run python monitor_intraday_signals.py
+uv run python scripts/monitor_intraday_signals.py
 ```
 
 ### Q4: 想禁用 DeepSeek AI（省钱）
@@ -172,7 +172,7 @@ uv sync
 export MYSQL_URL="mysql+pymysql://root:password@localhost:3306/stock_data"
 
 # 3. 补历史数据
-uv run python ingest_eastmoney_daily_to_mysql.py
+uv run python scripts/ingest_eastmoney_daily_to_mysql.py
 
 # 4. 修改配置（禁用飞书和 AI）
 # 编辑 monitor_intraday_signals.py：
@@ -180,7 +180,7 @@ uv run python ingest_eastmoney_daily_to_mysql.py
 #   enable_deepseek = False
 
 # 5. 运行
-uv run python monitor_intraday_signals.py
+uv run python scripts/monitor_intraday_signals.py
 ```
 
 ---

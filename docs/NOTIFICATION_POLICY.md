@@ -28,8 +28,8 @@
 **使用方式：**
 ```bash
 # 手动运行并查看结果
-uv run python run_premarket_analysis.py
-uv run python run_aftermarket_analysis.py
+uv run python scripts/run_premarket_analysis.py
+uv run python scripts/run_aftermarket_analysis.py
 
 # 或查看日志文件
 cat logs/premarket_$(date +%Y%m%d).log

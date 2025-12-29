@@ -116,7 +116,7 @@ if intraday_bars and len(intraday_bars) > 0:
 cd /Users/huan.yu/dev/demo/stock/tushare-mcp
 
 # 运行采集脚本（每分钟采集一次）
-uv run python poll_eastmoney_intraday_snapshot_to_mysql.py
+uv run python scripts/poll_eastmoney_intraday_snapshot_to_mysql.py
 ```
 
 建议在后台持续运行，或使用 cron/launchd 定时任务。
@@ -125,7 +125,7 @@ uv run python poll_eastmoney_intraday_snapshot_to_mysql.py
 
 ```bash
 # 单次测试
-uv run python test_intraday_bars.py
+uv run python tests/manual/test_intraday_bars.py
 
 # 或直接调用
 uv run python -c "from tushare_mcp import deepseek_intraday_t_signal; print(deepseek_intraday_t_signal('159218', position_cost=1.55, position_ratio=0.5))"
@@ -135,7 +135,7 @@ uv run python -c "from tushare_mcp import deepseek_intraday_t_signal; print(deep
 
 ```bash
 # 运行监控脚本（会自动使用新的分钟线增强分析）
-uv run python monitor_intraday_signals.py
+uv run python scripts/monitor_intraday_signals.py
 ```
 
 ---
@@ -226,7 +226,7 @@ with engine.connect() as conn:
 "
 
 # 启动采集脚本
-uv run python poll_eastmoney_intraday_snapshot_to_mysql.py
+uv run python scripts/poll_eastmoney_intraday_snapshot_to_mysql.py
 ```
 
 ### 问题 2：AI 分析结果没有明显改善

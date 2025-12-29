@@ -34,7 +34,7 @@ export MYSQL_URL="mysql+pymysql://user:pass@localhost:3306/stock_data"
 
 ```bash
 # 先补齐历史日线
-python ingest_eastmoney_daily_to_mysql.py --codes 159218,159840
+uv run python scripts/ingest_eastmoney_daily_to_mysql.py --codes 159218,159840
 ```
 
 ## 使用方式
@@ -45,7 +45,7 @@ python ingest_eastmoney_daily_to_mysql.py --codes 159218,159840
 
 ```bash
 cd tushare-mcp
-python test_deepseek_signal.py
+uv run python tests/manual/test_deepseek_signal.py
 ```
 
 输出示例：
@@ -105,7 +105,7 @@ def main() -> int:
 运行监控：
 
 ```bash
-python monitor_intraday_signals.py
+uv run python scripts/monitor_intraday_signals.py
 ```
 
 ### 方式 3：作为 MCP 工具调用（Claude Desktop 等）

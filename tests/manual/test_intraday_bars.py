@@ -1,3 +1,12 @@
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _bootstrap import ensure_repo_root_on_path
+
+ensure_repo_root_on_path()
+
 #!/usr/bin/env python3
 """
 测试分钟线数据是否被正确读取并传给 AI

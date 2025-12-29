@@ -12,13 +12,13 @@
 
 示例：
 1) 指定代码（逗号分隔）：
-   python ingest_eastmoney_daily_to_mysql.py --codes 000592,159218
+   uv run python scripts/ingest_eastmoney_daily_to_mysql.py --codes 000592,159218
 
 2) 从文件读取代码（每行一个）：
-   python ingest_eastmoney_daily_to_mysql.py --codes-file codes.txt
+   uv run python scripts/ingest_eastmoney_daily_to_mysql.py --codes-file codes.txt
 
 3) 指定 MySQL 连接串（也可用环境变量 MYSQL_URL）：
-   python ingest_eastmoney_daily_to_mysql.py --mysql-url "mysql+pymysql://user:pass@localhost:3306/stock_data"
+   uv run python scripts/ingest_eastmoney_daily_to_mysql.py --mysql-url "mysql+pymysql://user:pass@localhost:3306/stock_data"
 """
 
 from __future__ import annotations
@@ -28,7 +28,16 @@ import os
 import re
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterable
+
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _bootstrap import ensure_repo_root_on_path
+
+ensure_repo_root_on_path()
 
 import requests
 from sqlalchemy import (

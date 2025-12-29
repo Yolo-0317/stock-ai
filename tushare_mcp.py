@@ -6,6 +6,7 @@ import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from decimal import Decimal, InvalidOperation
 
 # 加载 .env 文件（如果存在）
 try:
@@ -675,23 +676,93 @@ def _call_deepseek_api(prompt: str, temperature: float = 0.3) -> str:
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    data = {
-        "model": "deepseek-chat",
-        "messages": [
-            {
-                "role": "system",
-                "content": "你是一个专业的量化交易分析师，擅长技术分析和量价分析。",
-            },
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": temperature,
-        "max_tokens": 800,
+    system_msg = {
+        "role": "system",
+        "content": "你是一个专业的量化交易分析师，擅长技术分析和量价分析。",
     }
+    base_messages = [system_msg, {"role": "user", "content": prompt}]
 
-    resp = requests.post(api_url, json=data, headers=headers, timeout=30)
-    resp.raise_for_status()
-    result = resp.json()
-    return result["choices"][0]["message"]["content"]
+    # 超时与重试策略（可通过环境变量覆盖）
+    # - DEEPSEEK_TIMEOUT_SECONDS：read 超时（秒）
+    # - DEEPSEEK_CONNECT_TIMEOUT_SECONDS：connect 超时（秒）
+    # - DEEPSEEK_RETRIES：最大重试次数（包含首次）
+    # - DEEPSEEK_RETRY_BACKOFF_SECONDS：退避基数（指数退避）
+    # - DEEPSEEK_MAX_TOKENS：单次最大输出 token（默认 1600；盘后/长文建议调大）
+    # - DEEPSEEK_CONTINUE_ON_LENGTH：当返回 length 截断时是否自动续写（默认 true）
+    connect_timeout = float(os.getenv("DEEPSEEK_CONNECT_TIMEOUT_SECONDS") or 10)
+    read_timeout = float(os.getenv("DEEPSEEK_TIMEOUT_SECONDS") or 60)
+    max_retries = int(os.getenv("DEEPSEEK_RETRIES") or 3)
+    backoff_base = float(os.getenv("DEEPSEEK_RETRY_BACKOFF_SECONDS") or 2)
+    max_tokens = int(os.getenv("DEEPSEEK_MAX_TOKENS") or 1600)
+    continue_on_length = str(os.getenv("DEEPSEEK_CONTINUE_ON_LENGTH") or "true").lower() in (
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    )
+
+    retryable_status = {408, 429, 500, 502, 503, 504}
+    last_err: Exception | None = None
+
+    def _request(messages: list[dict], _max_tokens: int) -> tuple[str, str | None]:
+        """
+        发起一次 DeepSeek 请求，返回 (content, finish_reason)。
+        """
+        nonlocal last_err
+        data = {
+            "model": "deepseek-chat",
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": int(_max_tokens),
+        }
+        for attempt in range(1, max_retries + 1):
+            try:
+                resp = requests.post(
+                    api_url,
+                    json=data,
+                    headers=headers,
+                    timeout=(connect_timeout, read_timeout),
+                )
+
+                if resp.status_code in retryable_status:
+                    raise RuntimeError(
+                        f"DeepSeek API HTTP {resp.status_code}: {resp.text[:200]}"
+                    )
+
+                resp.raise_for_status()
+                result = resp.json()
+                choice = (result.get("choices") or [{}])[0] or {}
+                content = ((choice.get("message") or {}) or {}).get("content") or ""
+                finish_reason = choice.get("finish_reason")
+                return str(content), finish_reason
+            except Exception as e:
+                last_err = e
+                if attempt >= max_retries:
+                    break
+                sleep_s = max(0.5, backoff_base * (2 ** (attempt - 1)))
+                time.sleep(sleep_s)
+        raise RuntimeError(f"DeepSeek API 调用失败（已重试 {max_retries} 次）: {last_err}")
+
+    content, finish = _request(base_messages, max_tokens)
+
+    # 盘后/长文偶发会因 max_tokens 截断：可选自动续写一次（避免日志出现半句）
+    if continue_on_length and str(finish).lower() == "length":
+        cont_messages = (
+            base_messages
+            + [{"role": "assistant", "content": content}]
+            + [
+                {
+                    "role": "user",
+                    "content": "请从上次中断处继续输出，保持相同格式，不要重复前文。",
+                }
+            ]
+        )
+        cont_text, _finish2 = _request(cont_messages, max_tokens)
+        # 直接拼接（不额外插入提示，避免影响严格解析场景）
+        content = (content.rstrip() + "\n" + cont_text.lstrip()).strip()
+
+    return content
 
 
 def _build_deepseek_prompt(code: str, hist_df: pd.DataFrame, latest_data: dict) -> str:
@@ -967,6 +1038,17 @@ def deepseek_intraday_t_signal(
     - MYSQL_URL：MySQL 连接串（必需）
     """
     try:
+        # 0) 归一化持仓参数：允许外部传 None（空仓），避免后续比较/格式化报错
+        if position_cost is not None:
+            try:
+                position_cost = float(position_cost)
+            except Exception:
+                position_cost = None
+        try:
+            position_ratio = float(position_ratio or 0.0)
+        except Exception:
+            position_ratio = 0.0
+
         code6 = _normalize_code(code)
 
         # 1) 读历史收盘（用于均线基线 + 喂给 AI）
@@ -1108,6 +1190,122 @@ def deepseek_intraday_t_signal(
         # 7) 解析 AI 返回
         parsed = _parse_intraday_t_response(ai_response)
 
+        # 7.5) 兜底：确保给出明确的“执行/止损/目标/仓位”数值（即便 AI 输出含糊或缺失）
+        def _first_float(text: str) -> float | None:
+            try:
+                s = str(text)
+            except Exception:
+                return None
+            m = re.search(r"(-?\d+(?:\.\d+)?)", s)
+            if not m:
+                return None
+            try:
+                return float(m.group(1))
+            except Exception:
+                return None
+
+        def _fmt_price(x: float) -> str:
+            return f"{x:.3f}"
+
+        # 关键参考位（只用当前已知信息，避免拍脑袋）
+        # 注意：不要把 rt_close 放进候选，否则“支撑/压力”容易退化成当前价本身。
+        lvl_candidates = [rt_low, rt_high, rt_open, ma5, ma20, y_close]
+        lvl_candidates = [float(x) for x in lvl_candidates if x is not None]
+        # 支撑：<= 当前价的最大值（否则回退到日内低点）
+        support = max([x for x in lvl_candidates if x <= rt_close] or [rt_low])
+        # 压力：>= 当前价的最小值（否则回退到日内高点）
+        resistance = min([x for x in lvl_candidates if x >= rt_close] or [rt_high])
+
+        action = (parsed.get("action") or "暂不操作").strip()
+
+        exec_p = _first_float(parsed.get("price", ""))
+        stop_p = _first_float(parsed.get("stop_loss", ""))
+        target_p = _first_float(parsed.get("target", ""))
+        # 将明显无效的占位值视为缺失
+        if stop_p is not None and stop_p <= 0:
+            stop_p = None
+        if target_p is not None and target_p <= 0:
+            target_p = None
+
+        # 默认仓位建议：不给持仓时，用“总资金仓位”表述
+        size_raw = str(parsed.get("size", "") or "").strip()
+        if not size_raw or size_raw.upper() == "N/A":
+            if action == "立即买入":
+                parsed["size"] = "20%"
+            elif action == "立即卖出":
+                parsed["size"] = "0%"
+            else:
+                parsed["size"] = "0%"
+
+        if exec_p is None:
+            # 立即操作默认用当前价；不操作则给出更“像操盘点”的参考位
+            if action == "立即买入":
+                exec_p = rt_close
+            elif action == "立即卖出":
+                exec_p = rt_close
+            else:
+                # 观望时也给一个可挂单的“操盘区间”参考：靠近支撑/压力
+                exec_p = rt_close
+
+        # 合理化：确保执行价落在日内区间内
+        exec_p = min(max(exec_p, rt_low), rt_high)
+
+        if action == "立即买入":
+            # 止损：略低于支撑 / 或略低于日内低点（取更保守者）
+            if stop_p is None:
+                stop_p = min(support * 0.995, exec_p * 0.995, rt_low * 0.999)
+            # 目标：优先看压力/日内高点
+            if target_p is None:
+                target_p = max(resistance, exec_p * 1.01)
+        elif action == "立即卖出":
+            # 止损：略高于压力/执行价
+            if stop_p is None:
+                stop_p = max(resistance * 1.005, exec_p * 1.005)
+            # 目标：优先看支撑/日内低点
+            if target_p is None:
+                target_p = min(support, exec_p * 0.99)
+        else:
+            # 暂不操作：仍给出“操盘区间”——执行价用当前价，止损/目标给支撑/压力参考
+            if stop_p is None:
+                stop_p = support
+            if target_p is None:
+                target_p = resistance
+
+        # 给出“买卖区间”兜底（用于更明确的操盘位置）
+        try:
+            zone_w = max((rt_high - rt_low) * 0.10, rt_close * 0.002)
+        except Exception:
+            zone_w = rt_close * 0.002
+        buy_lo = max(rt_low, support)
+        buy_hi = min(rt_high, max(buy_lo, support + zone_w))
+        sell_hi = min(rt_high, resistance)
+        sell_lo = max(rt_low, min(sell_hi, resistance - zone_w))
+        parsed["buy_zone"] = f"{_fmt_price(buy_lo)}~{_fmt_price(buy_hi)}"
+        parsed["sell_zone"] = f"{_fmt_price(sell_lo)}~{_fmt_price(sell_hi)}"
+
+        # 最后再做一次夹逼，避免出现反常数值
+        stop_p = float(stop_p)
+        target_p = float(target_p)
+        if action == "立即买入" and stop_p >= exec_p:
+            stop_p = exec_p * 0.995
+        if action == "立即卖出" and stop_p <= exec_p:
+            stop_p = exec_p * 1.005
+
+        parsed["price"] = _fmt_price(exec_p)
+        parsed["stop_loss"] = _fmt_price(stop_p)
+        parsed["target"] = _fmt_price(target_p)
+        # 额外操盘位（可选展示/日志）
+        parsed["support"] = _fmt_price(support)
+        parsed["resistance"] = _fmt_price(resistance)
+
+        # 小资金账户：把“建议数量”换算成大致金额，便于实盘落单
+        total_capital = float(os.getenv("TOTAL_CAPITAL_CNY") or 10000)
+        ratio = _parse_percent_to_ratio(parsed.get("size", ""))
+        if ratio is not None and ratio >= 0 and total_capital > 0:
+            approx_amt = int(round(total_capital * ratio))
+            parsed["size_amount"] = f"≈{approx_amt}元"
+        else:
+            parsed["size_amount"] = ""
         # 8) 格式化输出报告
         pct_str = f"{pct_chg:.2f}%" if pct_chg is not None else "未知"
 
@@ -1143,9 +1341,15 @@ def deepseek_intraday_t_signal(
         🎯 **操作指令**: {action}
 
         📍 执行价格: {parsed['price']}
-        📊 建议数量: {parsed['size']}
+        📊 建议数量: {parsed['size']} {parsed.get('size_amount','')}
         🛡️ 止损价格: {parsed['stop_loss']}
         🎁 目标价格: {parsed['target']}
+        📌 参考支撑/压力: {parsed.get('support','N/A')} / {parsed.get('resistance','N/A')}
+        🧭 买入/卖出区间: {parsed.get('buy_zone','N/A')} / {parsed.get('sell_zone','N/A')}
+        支撑位: {parsed.get('support','N/A')}
+        压力位: {parsed.get('resistance','N/A')}
+        买入区间: {parsed.get('buy_zone','N/A')}
+        卖出区间: {parsed.get('sell_zone','N/A')}
 
         💡 核心原因: {parsed['reason']}
         ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1155,7 +1359,9 @@ def deepseek_intraday_t_signal(
         
         ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         """
-        return report
+        # 清理缩进：避免日志里整体右移（尤其在 scripts/ 下运行时）
+        cleaned = "\n".join([ln.lstrip() for ln in str(report).splitlines()]).strip()
+        return cleaned
 
     except Exception as e:
         return f"DeepSeek 盘中做T分析过程中出错: {str(e)}"
@@ -1217,8 +1423,17 @@ def _build_intraday_t_prompt(
         - **浮动盈亏**: {profit:+.2f}%
         """
 
+    total_capital = float(os.getenv("TOTAL_CAPITAL_CNY") or 10000)
+
     prompt = f"""
-        你是一个盘中交易助手，给出简单明确的操作指令。
+        你是一个盘中交易助手。
+
+        ## 交易者画像（非常重要）
+        - 身份：个人投资者
+        - 总资金规模：约 {total_capital:.0f} 元（<= 1 万）
+        - 目标：做T（低吸高抛）+ 持有（趋势跟随）的组合收益
+        - 偏好：优先 ETF（流动性好、滑点小），不使用杠杆/融资融券
+        - 约束：必须考虑手续费与滑点，避免“频繁小利”被成本吃掉；宁可少做，也要做高胜率/高性价比的 T
 
         ## 历史行情（最近 10 天）
         {hist_table}
@@ -1247,6 +1462,9 @@ def _build_intraday_t_prompt(
         4. **多空力量**：买盘强还是卖盘强？是否有明显的多空转换信号？
 
         基于以上综合分析，给出**当前时刻是否应该立即操作**的明确建议。
+        - 若没有明显优势，请给“暂不操作”
+        - 做T优先围绕“支撑位附近低吸/压力位附近高抛”，不要追涨杀跌
+        - 给出的“建议数量”必须适合小资金账户（例如 10%/20%/30%/0%），避免大幅加杠杆式建议
 
         **只从以下3个指令中选择1个**：
         1. **立即买入** - 现在就是好的买点（回调到支撑、突破确认、多头力量强等）
@@ -1260,12 +1478,16 @@ def _build_intraday_t_prompt(
         量价配合: [分析成交量变化，1-2句话]
         关键位置: [当前支撑/压力位，1-2句话]
 
-        然后给出操作建议（每行一个字段）：
+        然后给出操作建议：
         操作指令: [立即买入/立即卖出/暂不操作]
-        执行价格: [当前价附近的具体价格，如 0.869]
-        建议数量: [具体占总资金的比例，如 20%]
-        止损价格: [具体价格]
-        目标价格: [具体价格]
+        执行价格: [必须是数字，保留3位小数；且在“最低~最高”区间内]
+        建议数量: [占总资金比例，必须是数字百分比，如 20% / 0%；并确保适合约 {total_capital:.0f} 元小资金]
+        止损价格: [必须是数字，保留3位小数；买入止损 < 执行价；卖出止损 > 执行价]
+        目标价格: [必须是数字，保留3位小数；买入目标 > 执行价；卖出目标 < 执行价]
+        支撑位: [必须是数字，保留3位小数；从 MA5/MA20/昨收/日内低点 等推导]
+        压力位: [必须是数字，保留3位小数；从 MA5/MA20/昨收/日内高点 等推导]
+        买入区间: [形如 1.234~1.245（保留3位小数）]
+        卖出区间: [形如 1.260~1.275（保留3位小数）]
         核心原因: [综合上述分析的一句话结论，不超过50字]
         """
     return prompt
@@ -1281,6 +1503,10 @@ def _parse_intraday_t_response(response: str) -> dict:
         "size": "N/A",
         "stop_loss": "N/A",
         "target": "N/A",
+        "support": "N/A",
+        "resistance": "N/A",
+        "buy_zone": "N/A",
+        "sell_zone": "N/A",
         "reason": "",
         "raw": response,
     }
@@ -1317,6 +1543,14 @@ def _parse_intraday_t_response(response: str) -> dict:
             result["target"] = (
                 line_stripped.split(":", 1)[-1].split("：", 1)[-1].strip()
             )
+        elif line_stripped.startswith("支撑位:") or line_stripped.startswith("支撑位："):
+            result["support"] = line_stripped.split(":", 1)[-1].split("：", 1)[-1].strip()
+        elif line_stripped.startswith("压力位:") or line_stripped.startswith("压力位："):
+            result["resistance"] = line_stripped.split(":", 1)[-1].split("：", 1)[-1].strip()
+        elif line_stripped.startswith("买入区间:") or line_stripped.startswith("买入区间："):
+            result["buy_zone"] = line_stripped.split(":", 1)[-1].split("：", 1)[-1].strip()
+        elif line_stripped.startswith("卖出区间:") or line_stripped.startswith("卖出区间："):
+            result["sell_zone"] = line_stripped.split(":", 1)[-1].split("：", 1)[-1].strip()
         elif line_stripped.startswith("核心原因:") or line_stripped.startswith(
             "核心原因："
         ):
@@ -1325,6 +1559,31 @@ def _parse_intraday_t_response(response: str) -> dict:
             )
 
     return result
+
+
+def _parse_percent_to_ratio(s: str) -> float | None:
+    """
+    将 '20%' / '20 %' / '0.2' 等解析为比例（0-1）。
+    """
+    raw = str(s or "").strip()
+    if not raw:
+        return None
+    m = re.search(r"(-?\d+(?:\.\d+)?)", raw)
+    if not m:
+        return None
+    try:
+        val = float(m.group(1))
+    except Exception:
+        return None
+    if "%" in raw:
+        return val / 100.0
+    # 兼容直接给 0.2 的情况
+    if 0 <= val <= 1:
+        return val
+    # 兼容给 20 但没写 % 的情况（保守按百分比）
+    if 0 <= val <= 100:
+        return val / 100.0
+    return None
 
 
 def deepseek_premarket_analysis(
@@ -1500,24 +1759,39 @@ def deepseek_aftermarket_analysis(
             else "（暂无分钟数据）"
         )
 
-        report = f"""
-        ### 🌙 盘后分析: {code}
-        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        📊 **今日收盘** ({latest['trade_date']})
-        收盘价: {latest['close']:.3f}  |  涨跌: {latest['pct_chg']:.2f}%
-        日内区间: {latest['low']:.3f} ~ {latest['high']:.3f}
-        技术指标: MA5={latest['ma5']:.4f}, MA20={latest['ma20']:.4f}
-        日内数据: {intraday_info}
+        # 清理 AI 输出：去掉每行多余前导空格，避免日志里出现“整体右移/对不齐”
+        analysis_lines = []
+        for line in str(analysis).splitlines():
+            analysis_lines.append(line.lstrip())
+        cleaned_analysis = "\n".join(analysis_lines).strip()
 
-        {_format_position_info(position_info, latest['close'])}
-        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        sep = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        parts = [
+            f"### 🌙 盘后分析: {code}",
+            sep,
+            f"📊 **今日收盘**（{latest['trade_date']}）",
+            f"- **收盘价**: {latest['close']:.3f}  |  **涨跌**: {latest['pct_chg']:.2f}%",
+            f"- **日内区间**: {latest['low']:.3f} ~ {latest['high']:.3f}",
+            f"- **技术指标**: MA5={latest['ma5']:.4f}, MA20={latest['ma20']:.4f}",
+            f"- **日内数据**: {intraday_info}",
+        ]
 
-        📋 **AI 盘后复盘**：
-        {analysis}
+        pos_block = _format_position_info(position_info, float(latest["close"]))
+        if pos_block:
+            parts.append("")
+            parts.append(pos_block)
 
-        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        """
-        return report
+        parts.extend(
+            [
+                "",
+                "📋 **AI 盘后复盘**",
+                cleaned_analysis,
+                "",
+                sep,
+            ]
+        )
+
+        return "\n".join([p for p in parts if p is not None])
 
     except Exception as e:
         return f"❌ 盘后分析过程中出错: {e}"
@@ -1549,8 +1823,16 @@ def _build_premarket_prompt(
 - **浮动盈亏**: {profit:+.2f}%
 """
 
+    total_capital = float(os.getenv("TOTAL_CAPITAL_CNY") or 10000)
     prompt = f"""
-你是一个专业的股票分析师，现在是开盘前，请基于昨日收盘数据给出今日操作建议。
+你是一个专业的交易分析师，现在是开盘前，请基于昨日收盘数据给出今日操作建议。
+
+## 交易者画像（非常重要）
+- 身份：个人投资者
+- 总资金规模：约 {total_capital:.0f} 元（<= 1 万）
+- 标的：优先 ETF（流动性好）
+- 目标：做T（盘中高抛低吸小幅增厚） + 持有（趋势跟随）
+- 约束：不使用杠杆；必须考虑手续费/滑点；建议必须“可执行、可落单”，避免空泛
 
 ## 历史行情（最近 10 天）
 {hist_table}
@@ -1584,10 +1866,11 @@ def _build_premarket_prompt(
 - 压力位: [具体价格]
 
 **今日策略**:
-[具体的操作建议，包括：
+[具体的操作建议（适合小资金账户），包括：
 - 开盘时应该做什么？（观望/买入/卖出）
-- 什么价位适合操作？
-- 需要注意什么风险？]
+- **关键价位**（支撑/压力/买入区间/卖出区间）
+- **仓位建议**（用百分比描述，比如 10%/20%/0%）
+- 风险与撤退条件（触发条件要明确）]
 
 **详细分析**:
 [对趋势、技术位置、动能的详细分析，3-5点]
@@ -1642,8 +1925,16 @@ def _build_aftermarket_prompt(
 - **浮动盈亏**: {profit:+.2f}%
 """
 
+    total_capital = float(os.getenv("TOTAL_CAPITAL_CNY") or 10000)
     prompt = f"""
-你是一个专业的股票分析师，现在是收盘后，请复盘今日走势并给出明日展望。
+你是一个专业的交易分析师，现在是收盘后，请复盘今日走势并给出明日展望。
+
+## 交易者画像（非常重要）
+- 身份：个人投资者
+- 总资金规模：约 {total_capital:.0f} 元（<= 1 万）
+- 标的：优先 ETF（流动性好）
+- 目标：做T（增厚收益） + 持有（趋势跟随）
+- 约束：不使用杠杆；必须考虑手续费/滑点；建议要具体到价位与触发条件
 
 ## 历史行情（最近 10 天）
 {hist_table}
@@ -1673,23 +1964,25 @@ def _build_aftermarket_prompt(
 
 请按以下格式输出：
 
-**今日总结**: [今日走势的一句话总结]
+**今日总结**: [一句话总结]
 
-**技术形态**: [今日收盘后的技术形态描述]
+## 技术形态
+[今日收盘后的技术形态描述]
 
-**明日展望**:
-- 预期方向: [看涨/看跌/震荡]
-- 关键支撑: [具体价格]
-- 关键压力: [具体价格]
+## 明日展望
+- **预期方向**: [看涨/看跌/震荡]
+- **关键支撑**: [具体价格]
+- **关键压力**: [具体价格]
 
-**操作建议**:
-[针对不同情况的操作建议：
-- 持仓者: 应该持有/减仓/加仓？
-- 空仓者: 是否有介入机会？
-- 风险提示: 需要注意什么？]
+## 操作建议
+- **持仓者**: [持有/减仓/加仓/做T的计划；明确“在哪些价位做T、做多少比例”]
+- **空仓者**: [是否有介入机会；给出“买入区间”和“止损条件”】【小资金账户不追高】]
+- **风险提示**: [需要注意什么？]
 
-**详细分析**:
-[对今日走势、技术变化、明日展望的详细分析，3-5点]
+## 详细分析
+1. **今日走势复盘**: [...]
+2. **技术变化解析**: [...]
+3. **明日展望与操作逻辑**: [...]
 """
     return prompt
 
@@ -1700,9 +1993,13 @@ def _format_position_info(position_info: dict, current_price: float) -> str:
         return ""
 
     profit = (current_price - position_info["cost"]) / position_info["cost"] * 100
-    return f"""**持仓信息**:
-   成本价: {position_info['cost']:.3f}  |  仓位: {position_info['ratio']:.1%}
-   浮动盈亏: {profit:+.2f}%"""
+    return "\n".join(
+        [
+            "💼 **持仓信息**",
+            f"- **成本价**: {position_info['cost']:.3f}  |  **仓位**: {position_info['ratio']:.1%}",
+            f"- **浮动盈亏**: {profit:+.2f}%",
+        ]
+    )
 
 
 if __name__ == "__main__":

@@ -1,5 +1,14 @@
 """调试脚本：查看 intraday_trade_signal 的原始输出"""
 
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _bootstrap import ensure_repo_root_on_path
+
+ensure_repo_root_on_path()
+
 from tushare_mcp import intraday_trade_signal
 
 code = "159218"

@@ -197,7 +197,7 @@ log_file = log_path / "monitor.log"
 ```bash
 # 实时查看监控输出
 cd /Users/huan.yu/dev/demo/stock/tushare-mcp
-uv run python monitor_intraday_signals.py
+uv run python scripts/monitor_intraday_signals.py
 
 # 另开一个终端，实时查看日志文件
 tail -f logs/monitor_$(date +%Y%m%d).log
