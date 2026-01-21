@@ -16,7 +16,7 @@ from _bootstrap import ensure_repo_root_on_path
 ensure_repo_root_on_path()
 
 # 统一的代码名称映射
-from code_names import code_label
+from code_names import code_label, CODES
 
 # 导入日志配置
 from logger_config import setup_monitor_logging
@@ -127,7 +127,8 @@ def main() -> int:
     # =========================
     # 配置区：按需修改即可（不通过命令行传参）
     # =========================
-    codes = ["159218", "159840", "512400"]  # 关注标的
+    # 从统一位置导入codes（若需要自定义，可在此处覆盖）
+    codes = CODES
     interval = 60.0  # 轮询间隔（秒）
     print_bias = False  # True：也打印"偏买入/偏卖出"
     all_day = False  # True：全天都跑；False：只在交易时段判断
@@ -161,13 +162,13 @@ def main() -> int:
     log_ai_detail = True  # True：在日志文件中记录AI完整分析；False：只记录简洁信号
     position_costs = {  # 各品种的持仓成本（可选，用于计算盈亏）
         "159218": 1.197,
-        "159840": 0.869,
-        "512400": None,
+        "159840": 0.852,
+        "512400": 1.907,
     }
     position_ratios = {  # 各品种的当前仓位比例 0-1（可选）
-        "159218": 0.2374,  # 50% 仓位
-        "159840": 0.1058,  # 空仓
-        "512400": None,
+        "159218": 4.03/100,  # 50% 仓位
+        "159840": 12.44/100,  # 空仓
+        "512400": 22.89/100,
     }
 
     if not codes:

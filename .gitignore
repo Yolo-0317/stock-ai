@@ -17,3 +17,5 @@ wheels/
 # Logs
 logs/
 *.log
+
+output/*

@@ -21,9 +21,7 @@ from _bootstrap import ensure_repo_root_on_path
 ensure_repo_root_on_path()
 
 from tushare_mcp import deepseek_trade_signal, intraday_trade_signal
-
-# 测试代码
-CODES = ["159218", "159840"]
+from code_names import CODES
 
 if __name__ == "__main__":
     for code in CODES:

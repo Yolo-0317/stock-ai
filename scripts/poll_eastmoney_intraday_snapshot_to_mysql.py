@@ -43,6 +43,7 @@ from _bootstrap import ensure_repo_root_on_path
 
 ensure_repo_root_on_path()
 
+from code_names import CODES
 from ingest_eastmoney_daily_to_mysql import (
     DEFAULT_MYSQL_URL,
     fetch_eastmoney_kline_daily,
@@ -242,15 +243,16 @@ def main() -> int:
     # 配置区：按需修改即可
     # =========================
     MYSQL_URL = os.getenv("MYSQL_URL") or DEFAULT_MYSQL_URL
-    CODES = ["159218", "159840", "512400"]  # 支持 '159840' / '159840.SZ' 等
-    INTERVAL_SECONDS = 60.0  # 每轮间隔秒数（默认 60 秒）
+    # 从统一位置导入codes（若需要自定义，可在此处覆盖）
+    CODES_LIST = CODES
+    INTERVAL_SECONDS = 10.0  # 每轮间隔秒数（默认 60 秒）
     PER_CODE_SLEEP_SECONDS = 0.2  # 每个 code 请求后的 sleep（默认 0.2 秒）
     ONCE = False  # True：只跑一轮就退出（适合 cron）；False：常驻轮询
     ALL_DAY = False  # True：全天抓取；False：仅交易时段抓取（推荐）
 
     cfg = PollConfig(
         mysql_url=MYSQL_URL,
-        codes=CODES,
+        codes=CODES_LIST,
         interval_seconds=INTERVAL_SECONDS,
         per_code_sleep_seconds=PER_CODE_SLEEP_SECONDS,
         once=ONCE,

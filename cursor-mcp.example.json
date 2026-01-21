@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "tushare-stock-advisor": {
+      "command": "/Users/yolo/dev/yolo/stock-ai/.venv/bin/python",
+      "args": [
+        "/Users/yolo/dev/yolo/stock-ai/tushare_mcp.py"
+      ],
+      "env": {
+        "MYSQL_URL": "mysql+pymysql://user:pass@localhost:3306/stock_data",
+        "DEEPSEEK_API_KEY": "YOUR_KEY",
+        "TUSHARE_TOKEN": "YOUR_TOKEN",
+        "TOTAL_CAPITAL_CNY": "10000"
+      }
+    }
+  }
+}

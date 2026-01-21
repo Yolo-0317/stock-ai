@@ -39,6 +39,7 @@ from _bootstrap import ensure_repo_root_on_path
 
 ensure_repo_root_on_path()
 
+from code_names import CODES
 import requests
 from sqlalchemy import (
     BigInteger,
@@ -333,14 +334,15 @@ def _parse_codes_from_file(path: str) -> list[str]:
 
 def main() -> int:
     MYSQL_URL = os.getenv("MYSQL_URL") or DEFAULT_MYSQL_URL
-    # 示例：股票 / ETF 都支持
-    CODES = ["159218", "159840", "512400"]
+    # 从统一位置导入codes（若需要自定义，可在此处覆盖）
+    DEFAULT_CODES = CODES
+    CODES_LIST = DEFAULT_CODES
     CODES_FILE = ""  # 可选：代码文件路径（每行一个，支持 .SZ/.SH），例如 "codes.txt"
     LIMIT = 240  # 每个代码拉取的日线条数（默认 120）
     SLEEP_SECONDS = 0.2  # 每个代码请求间隔秒数（默认 0.2）
 
     codes: list[str] = []
-    codes.extend([c for c in CODES if str(c).strip()])
+    codes.extend([c for c in CODES_LIST if str(c).strip()])
     if CODES_FILE:
         codes.extend(_parse_codes_from_file(CODES_FILE))
 

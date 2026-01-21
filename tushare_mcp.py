@@ -19,8 +19,14 @@ except ImportError:
     pass  # python-dotenv 未安装，跳过
 
 import pandas as pd
-import tushare as ts
 from mcp.server.fastmcp import FastMCP
+
+# tushare 是可选依赖：Cursor 的 MCP 进程可能用的是“独立 python 环境”
+# 若未安装 tushare，不应导致整个 MCP server 启动失败。
+try:
+    import tushare as ts  # type: ignore
+except Exception:
+    ts = None
 
 # 初始化 MCP Server
 mcp = FastMCP("TushareStockAdvisor")
@@ -28,7 +34,7 @@ mcp = FastMCP("TushareStockAdvisor")
 # 初始化 Tushare API (需从 tushare.pro 获取 Token)
 # 建议通过环境变量设置 TUSHARE_TOKEN
 TUSHARE_TOKEN = os.getenv("TUSHARE_TOKEN")
-if TUSHARE_TOKEN:
+if TUSHARE_TOKEN and ts is not None:
     ts.set_token(TUSHARE_TOKEN)
     pro = ts.pro_api()
 else:
@@ -89,7 +95,7 @@ def _eastmoney_fetch_kline_daily(code: str, limit: int = 120) -> list[list[str]]
         "fields1": "f1,f2,f3,f4,f5,f6",
         "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
         "klt": "101",  # 日线
-        "fqt": "1",  # 前复权
+        "fqt": "0",  # 不复权（与MySQL中的Tushare数据保持一致）
         "end": "20500101",
         "lmt": str(limit),
         "_": str(int(time.time() * 1000)),
@@ -145,13 +151,18 @@ def _mysql_load_close_history(
     engine = create_engine(url, pool_pre_ping=True)
     # MySQL 的 LIMIT 参数化在部分驱动上不稳定，这里用 int 拼接更稳（code 使用参数绑定防注入）
     limit_int = int(limit)
+    # 使用子查询：先降序取最新limit条，再升序排序返回
     sql = text(
         f"""
         SELECT trade_date, close
-        FROM stock_daily
-        WHERE ts_code = :code
+        FROM (
+            SELECT trade_date, close
+            FROM stock_daily
+            WHERE ts_code = :code
+            ORDER BY trade_date DESC
+            LIMIT {limit_int}
+        ) AS recent
         ORDER BY trade_date ASC
-        LIMIT {limit_int}
         """
     )
 
@@ -1350,6 +1361,8 @@ def deepseek_intraday_t_signal(
         压力位: {parsed.get('resistance','N/A')}
         买入区间: {parsed.get('buy_zone','N/A')}
         卖出区间: {parsed.get('sell_zone','N/A')}
+        做T计划: {parsed.get('t_plan','') or 'N/A'}
+        短线计划: {parsed.get('swing_plan','') or 'N/A'}
 
         💡 核心原因: {parsed['reason']}
         ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1465,6 +1478,9 @@ def _build_intraday_t_prompt(
         - 若没有明显优势，请给“暂不操作”
         - 做T优先围绕“支撑位附近低吸/压力位附近高抛”，不要追涨杀跌
         - 给出的“建议数量”必须适合小资金账户（例如 10%/20%/30%/0%），避免大幅加杠杆式建议
+        - 你必须同时给出两套策略建议：
+          - **做T策略（盘中）**：今日可执行的低吸/高抛区间、触发条件、失败撤退条件（止损/放弃）。
+          - **短线持有策略（1-3天）**：如果把它当短线持有/波段，应当如何持有/加仓/减仓？哪些条件触发（例如跌破 MA5/MA20、跌破关键支撑、放量滞涨等），给出明确价位与仓位比例建议。
 
         **只从以下3个指令中选择1个**：
         1. **立即买入** - 现在就是好的买点（回调到支撑、突破确认、多头力量强等）
@@ -1488,6 +1504,8 @@ def _build_intraday_t_prompt(
         压力位: [必须是数字，保留3位小数；从 MA5/MA20/昨收/日内高点 等推导]
         买入区间: [形如 1.234~1.245（保留3位小数）]
         卖出区间: [形如 1.260~1.275（保留3位小数）]
+        做T计划: [一句话概括今日做T打法（含触发条件+区间），不超过60字]
+        短线计划: [一句话概括1-3天短线持有打法（含触发条件+关键价位），不超过60字]
         核心原因: [综合上述分析的一句话结论，不超过50字]
         """
     return prompt
@@ -1507,6 +1525,8 @@ def _parse_intraday_t_response(response: str) -> dict:
         "resistance": "N/A",
         "buy_zone": "N/A",
         "sell_zone": "N/A",
+        "t_plan": "",
+        "swing_plan": "",
         "reason": "",
         "raw": response,
     }
@@ -1551,6 +1571,10 @@ def _parse_intraday_t_response(response: str) -> dict:
             result["buy_zone"] = line_stripped.split(":", 1)[-1].split("：", 1)[-1].strip()
         elif line_stripped.startswith("卖出区间:") or line_stripped.startswith("卖出区间："):
             result["sell_zone"] = line_stripped.split(":", 1)[-1].split("：", 1)[-1].strip()
+        elif line_stripped.startswith("做T计划:") or line_stripped.startswith("做T计划："):
+            result["t_plan"] = line_stripped.split(":", 1)[-1].split("：", 1)[-1].strip()
+        elif line_stripped.startswith("短线计划:") or line_stripped.startswith("短线计划："):
+            result["swing_plan"] = line_stripped.split(":", 1)[-1].split("：", 1)[-1].strip()
         elif line_stripped.startswith("核心原因:") or line_stripped.startswith(
             "核心原因："
         ):

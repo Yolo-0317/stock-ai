@@ -25,24 +25,19 @@ load_dotenv(dotenv_path=env_path)
 
 from feishu_notice import send_to_lark
 from logger_config import setup_logging
-from code_names import code_label
+from code_names import code_label, CODES
 
 # 导入分析函数
 from tushare_mcp import deepseek_aftermarket_analysis
-
-# 配置
-CODES = ["159218", "159840", "512400"]  # 关注的股票
 # 持仓成本
 POSITION_COSTS = {
-    "159218": 1.197,
-    "512400": None,
-    "159840": 0.869,
+    "159218": None,
+    "159530": None,
 }
 # 仓位比例
 POSITION_RATIOS = {
-    "159218": 0.2374,
-    "512400": None,
-    "159840": 0.1058,
+    "159218": None,
+    "159530": None,
 }
 
 # 是否发送飞书通知（盘后分析不需要推送，仅记录日志）

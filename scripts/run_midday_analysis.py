@@ -24,14 +24,11 @@ from dotenv import load_dotenv
 
 from logger_config import setup_logging
 from tushare_mcp import deepseek_intraday_t_signal
-from code_names import code_label
+from code_names import code_label, CODES
 
 # 加载环境变量（优先读取仓库根目录 .env）
 env_path = Path(__file__).resolve().parents[1] / ".env"
 load_dotenv(dotenv_path=env_path)
-
-# 配置
-CODES = ["159218", "159840", "512400"]
 
 # 是否发送飞书通知（午盘一般不需要推送，仅记录日志）
 ENABLE_FEISHU = False
