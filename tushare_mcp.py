@@ -156,11 +156,11 @@ def _mysql_load_close_history(
         f"""
         SELECT trade_date, close
         FROM (
-            SELECT trade_date, close
-            FROM stock_daily
-            WHERE ts_code = :code
+        SELECT trade_date, close
+        FROM stock_daily
+        WHERE ts_code = :code
             ORDER BY trade_date DESC
-            LIMIT {limit_int}
+        LIMIT {limit_int}
         ) AS recent
         ORDER BY trade_date ASC
         """

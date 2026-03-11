@@ -78,34 +78,32 @@ from sqlalchemy import create_engine, text
 # 策略参数
 # ============================================
 
-# 月线低位参数
-DIST_FROM_250D_HIGH_MIN = -55    # 距离250日高点最小值（%）
-DIST_FROM_250D_HIGH_MAX = -20    # 距离250日高点最大值（%）
+# 月线箱体参数 (基于700日数据模拟3年级别历史大底)
+BOX_PERIOD = 700                 # 箱体参考周期（约3年，预留余量）
+BOX_WIDTH_MAX = 80               # 3年大底箱体震荡幅度上限（%），放宽到80%
+BOX_BREAKOUT_THRESHOLD = 0       # 突破箱体上沿的比例（%）
 
-DIST_FROM_250D_LOW_MIN = 5       # 距离250日低点最小值（%）
-DIST_FROM_250D_LOW_MAX = 30      # 距离250日低点最大值（%）
+# 底部位置参数
+DIST_FROM_250D_HIGH_MAX = -2     # 距离250日高点至少还有2%空间，确保不是历史最高点
+DIST_FROM_250D_LOW_MAX = 100     # 距离250日低点不超过100%（3年大底反弹空间更大）
 
-PCT_CHG_120D_MIN = -15           # 120日涨幅最小值（%）
-PCT_CHG_120D_MAX = 15            # 120日涨幅最大值（%）
-
-DEVIATION_FROM_MA60_MIN = -5     # 价格相对MA60乖离最小值（%）
-DEVIATION_FROM_MA60_MAX = 10     # 价格相对MA60乖离最大值（%）
-
-MA60_GROWTH_RATE = -1            # MA60近20日增长率（%）
+# 趋势确认参数
+MA_LONG_PERIOD = 60              # 长期趋势线
+MA_SHORT_PERIOD = 20             # 中期趋势线
 
 # 日线多头参数（早介入版）
-MA5_GROWTH_RATE = 0.8            # MA5增长率（%）
-MA10_GROWTH_RATE = 0.3           # MA10增长率（%）
+MA5_GROWTH_RATE = 0.5            # MA5增长率（%）
+MA10_GROWTH_RATE = 0.1           # MA10增长率（%）
 
-MIN_5D_CHG = 3                   # 近5日涨幅最小值（%）
-MAX_5D_CHG = 12                  # 近5日涨幅最大值（%）
+MIN_5D_CHG = 0                   # 近5日涨幅最小值（%）
+MAX_5D_CHG = 15                  # 近5日涨幅最大值（%）
 
-MIN_10D_CHG = 5                  # 近10日涨幅最小值（%）
-MAX_10D_CHG = 20                 # 近10日涨幅最大值（%）
+MIN_10D_CHG = 0                  # 近10日涨幅最小值（%）
+MAX_10D_CHG = 25                 # 近10日涨幅最大值（%）
 
-MIN_VOLUME_RATIO = 1.3           # 最小量比
+MIN_VOLUME_RATIO = 0.8           # 最小量比（允许缩量回调启动）
 
-MIN_UP_DAYS_IN_5 = 3             # 近5日最少收阳天数
+MIN_UP_DAYS_IN_5 = 2             # 近5日最少收阳天数
 
 # 基础过滤
 MIN_PRICE = 5                    # 最低价格（元）
@@ -241,13 +239,24 @@ def calculate_indicators(df: pd.DataFrame, trade_date: str) -> pd.DataFrame:
         ma20_today = group['close'].tail(20).mean()
         ma60_today = group['close'].tail(60).mean()
         
-        # 计算250日高低点
-        if len(group) < 250:
+        # 计算250日高低点（模拟月线箱体）
+        if len(group) < BOX_PERIOD:
             continue
         
+        # 排除最近 10 天的数据来计算箱体上沿，避免突破本身拉高了箱体
+        box_data = group.iloc[-BOX_PERIOD:-10]
+        box_high = box_data['high'].max()
+        box_low = box_data['low'].min()
+        
+        # 箱体宽度（%）
+        box_width = (box_high - box_low) / box_low * 100
+        
+        # 突破确认：今日收盘价突破箱体上沿
+        breakout_ratio = (close_today - box_high) / box_high * 100
+        
+        # 距离250日整体高低点（用于位置判断）
         high_250d = group['high'].tail(250).max()
         low_250d = group['low'].tail(250).min()
-        
         dist_from_250d_high = (close_today - high_250d) / high_250d * 100
         dist_from_250d_low = (close_today - low_250d) / low_250d * 100
         
@@ -298,6 +307,8 @@ def calculate_indicators(df: pd.DataFrame, trade_date: str) -> pd.DataFrame:
             'ma10_today': ma10_today,
             'ma20_today': ma20_today,
             'ma60_today': ma60_today,
+            'box_width': box_width,
+            'breakout_ratio': breakout_ratio,
             'dist_from_250d_high': dist_from_250d_high,
             'dist_from_250d_low': dist_from_250d_low,
             'deviation_from_ma60': deviation_from_ma60,
@@ -355,88 +366,52 @@ def apply_strategy(df: pd.DataFrame) -> pd.DataFrame:
     df = df[df['amount'] > MIN_AMOUNT]
     print(f"  成交额筛选（>{MIN_AMOUNT}万）：{len(df)} 只")
     
-    # ========== 月线低位判断 ==========
+    # ========== 月线箱体突破判断 ==========
     
-    # 4. 距离250日高点
-    df = df[(df['dist_from_250d_high'] >= DIST_FROM_250D_HIGH_MIN) & 
-            (df['dist_from_250d_high'] <= DIST_FROM_250D_HIGH_MAX)]
-    print(f"  距离250日高点筛选（{DIST_FROM_250D_HIGH_MIN}%到{DIST_FROM_250D_HIGH_MAX}%）：{len(df)} 只")
+    # 4. 箱体宽度筛选（确保是窄幅震荡箱体）
+    df = df[df['box_width'] <= BOX_WIDTH_MAX]
+    print(f"  箱体宽度筛选（<{BOX_WIDTH_MAX}%）：{len(df)} 只")
     
-    # 5. 距离250日低点
-    df = df[(df['dist_from_250d_low'] >= DIST_FROM_250D_LOW_MIN) & 
+    # 5. 突破确认（今日收盘价突破箱体上沿）
+    df = df[df['breakout_ratio'] >= 0]
+    print(f"  箱体突破筛选（突破上沿）：{len(df)} 只")
+    
+    # 6. 底部位置确认（确保不是在高位突破）
+    df = df[(df['dist_from_250d_high'] <= DIST_FROM_250D_HIGH_MAX) & 
             (df['dist_from_250d_low'] <= DIST_FROM_250D_LOW_MAX)]
-    print(f"  距离250日低点筛选（+{DIST_FROM_250D_LOW_MIN}%到+{DIST_FROM_250D_LOW_MAX}%）：{len(df)} 只")
+    print(f"  底部位置筛选（距高点<{DIST_FROM_250D_HIGH_MAX}%且距低点<{DIST_FROM_250D_LOW_MAX}%）：{len(df)} 只")
     
-    # 6. 近120日涨幅
-    df = df[(df['pct_chg_120d'] >= PCT_CHG_120D_MIN) & 
-            (df['pct_chg_120d'] <= PCT_CHG_120D_MAX)]
-    print(f"  近120日涨幅筛选（{PCT_CHG_120D_MIN}%到{PCT_CHG_120D_MAX}%）：{len(df)} 只")
+    # ========== 日线多头确认 ==========
     
-    # 7. 价格在MA60附近
-    df = df[(df['deviation_from_ma60'] >= DEVIATION_FROM_MA60_MIN) & 
-            (df['deviation_from_ma60'] <= DEVIATION_FROM_MA60_MAX)]
-    print(f"  价格在MA60附近筛选（{DEVIATION_FROM_MA60_MIN}%到{DEVIATION_FROM_MA60_MAX}%）：{len(df)} 只")
-    
-    # 8. MA60近20日增长率
-    df = df[df['ma60_growth_rate'] > MA60_GROWTH_RATE]
-    print(f"  MA60向上筛选（增长率>{MA60_GROWTH_RATE}%）：{len(df)} 只")
-    
-    # ========== 日线多头判断（早介入版） ==========
-    
-    # 9. 多头排列：MA5 > MA10 > MA20（不要求MA60）
+    # 7. 多头排列：MA5 > MA10 > MA20
     df = df[(df['ma5_today'] > df['ma10_today']) & 
             (df['ma10_today'] > df['ma20_today'])]
     print(f"  多头排列筛选（MA5>MA10>MA20）：{len(df)} 只")
     
-    # 10. MA5增长率
+    # 8. MA5增长率
     df = df[df['ma5_growth_rate'] > MA5_GROWTH_RATE]
     print(f"  MA5加速筛选（增长率>{MA5_GROWTH_RATE}%）：{len(df)} 只")
     
-    # 11. MA10增长率
-    df = df[df['ma10_growth_rate'] > MA10_GROWTH_RATE]
-    print(f"  MA10向上筛选（增长率>{MA10_GROWTH_RATE}%）：{len(df)} 只")
-    
-    # 12. 近5日涨幅
-    df = df[(df['pct_chg_5d'] >= MIN_5D_CHG) & 
-            (df['pct_chg_5d'] <= MAX_5D_CHG)]
-    print(f"  近5日涨幅筛选（{MIN_5D_CHG}%到{MAX_5D_CHG}%）：{len(df)} 只")
-    
-    # 13. 近10日涨幅
-    df = df[(df['pct_chg_10d'] >= MIN_10D_CHG) & 
-            (df['pct_chg_10d'] <= MAX_10D_CHG)]
-    print(f"  近10日涨幅筛选（{MIN_10D_CHG}%到{MAX_10D_CHG}%）：{len(df)} 只")
-    
-    # 14. 量比
-    df = df[df['volume_ratio'] > MIN_VOLUME_RATIO]
-    print(f"  放量筛选（量比>{MIN_VOLUME_RATIO}）：{len(df)} 只")
-    
-    # 15. 近5日收阳天数
+    # 9. 连续性筛选
     df = df[df['up_days_in_5'] >= MIN_UP_DAYS_IN_5]
     print(f"  连续性筛选（近5日至少{MIN_UP_DAYS_IN_5}天收阳）：{len(df)} 只")
     
     # 16. 计算综合评分并排序
-    # 评分规则：从低点反弹25% + 日线强度25% + 成交额30% + 突破确认20%
+    # 评分规则：突破强度40% + 箱体紧凑度30% + 成交额30%
     
     # 归一化各项指标到0-1
-    df['score_low_position'] = (df['dist_from_250d_low'] - DIST_FROM_250D_LOW_MIN) / (DIST_FROM_250D_LOW_MAX - DIST_FROM_250D_LOW_MIN)
-    df['score_low_position'] = 1 - df['score_low_position']  # 越接近低点越好
-    
-    df['score_trend_strength'] = (df['pct_chg_10d'] - MIN_10D_CHG) / (MAX_10D_CHG - MIN_10D_CHG)
-    
-    # 成交额归一化（使用对数scale）
-    df['score_amount'] = (df['amount'] - df['amount'].min()) / (df['amount'].max() - df['amount'].min())
-    
-    # 突破确认度（MA5-MA10距离 + 站上MA20的程度）
-    df['ma5_ma10_gap'] = (df['ma5_today'] - df['ma10_today']) / df['ma10_today'] * 100
-    df['score_breakout'] = df['ma5_ma10_gap'] / 5  # 假设5%为满分
+    df['score_breakout'] = df['breakout_ratio'] / 10  # 假设10%为满分
     df['score_breakout'] = df['score_breakout'].clip(0, 1)
+    
+    df['score_box_tightness'] = 1 - (df['box_width'] / BOX_WIDTH_MAX)
+    
+    df['score_amount'] = (df['amount'] - df['amount'].min()) / (df['amount'].max() - df['amount'].min())
     
     # 综合评分
     df['total_score'] = (
-        df['score_low_position'] * 0.25 +
-        df['score_trend_strength'] * 0.25 +
-        df['score_amount'] * 0.30 +
-        df['score_breakout'] * 0.20
+        df['score_breakout'] * 0.40 +
+        df['score_box_tightness'] * 0.30 +
+        df['score_amount'] * 0.30
     )
     
     # 按综合评分降序排序
@@ -474,6 +449,8 @@ def save_results(df: pd.DataFrame, trade_date: str) -> Path:
         '名称': '',  # 暂时为空
         '收盘价': df['close'].round(2),
         '今日涨幅%': df['pct_chg'].round(2),
+        '箱体宽度%': df['box_width'].round(2),
+        '突破比例%': df['breakout_ratio'].round(2),
         'MA5': df['ma5_today'].round(2),
         'MA10': df['ma10_today'].round(2),
         'MA20': df['ma20_today'].round(2),
@@ -507,7 +484,7 @@ def save_results(df: pd.DataFrame, trade_date: str) -> Path:
 def main():
     """主函数"""
     # 配置参数：可以在这里修改日期
-    target_date = '20250901'  # 格式：'YYYYMMDD'，如 '20260109'；None 表示使用最新交易日
+    target_date = '20260226'  # 格式：'YYYYMMDD'，如 '20260109'；None 表示使用最新交易日
     
     try:
         # 1. 连接数据库
@@ -526,8 +503,8 @@ def main():
             trade_date = get_latest_trade_date(engine)
             print(f"✓ 使用最新交易日：{trade_date}")
         
-        # 3. 获取数据（需要400天数据，约250个交易日，以计算250日指标）
-        df = get_stock_data(engine, trade_date, days_back=400)
+        # 3. 获取数据（需要1100天数据，约750个交易日，以计算3年大底指标）
+        df = get_stock_data(engine, trade_date, days_back=1100)
         
         if df.empty:
             print("❌ 没有查询到数据")
@@ -554,15 +531,12 @@ def main():
         print("\n" + "=" * 80)
         print(f"✅ 选股完成！共筛选出 {len(df_selected)} 只股票")
         print(f"📄 结果文件：{filepath}")
-        print("\n💡 策略说明（底部启动版）：")
-        print("   - 月线低位 + 日线多头启动（早期介入）")
-        print("   - 排序规则：低位25% + 趋势25% + 成交额30% + 突破20%")
-        print(f"   - 距250日高点：{DIST_FROM_250D_HIGH_MIN}%到{DIST_FROM_250D_HIGH_MAX}%（月线低位）")
-        print(f"   - 距250日低点：+{DIST_FROM_250D_LOW_MIN}%到+{DIST_FROM_250D_LOW_MAX}%（刚从底部走出）")
-        print(f"   - 120日涨幅：{PCT_CHG_120D_MIN}%到{PCT_CHG_120D_MAX}%（长期横盘）")
-        print(f"   - 日线启动：MA5>MA10>MA20，5日涨幅{MIN_5D_CHG}%-{MAX_5D_CHG}%")
-        print(f"   - 持有周期：建议10天左右，中线操作")
-        print(f"   - 预期收益：5-8%（10天），上涨空间大")
+        print("\n💡 策略说明（3年大底箱体突破版）：")
+        print(f"   - 长期箱体震荡（{BOX_PERIOD}日，约3年）+ 日线多头突破")
+        print("   - 排序规则：突破强度40% + 箱体紧凑度30% + 成交额30%")
+        print(f"   - 箱体宽度限制：<{BOX_WIDTH_MAX}%")
+        print(f"   - 底部位置限制：距250日高点<{DIST_FROM_250D_HIGH_MAX}%，距低点<{DIST_FROM_250D_LOW_MAX}%")
+        print(f"   - 日线启动：MA5>MA10>MA20，MA5加速>{MA5_GROWTH_RATE}%")
         print("=" * 80)
         
     except Exception as e:
