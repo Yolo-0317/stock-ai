@@ -43,9 +43,17 @@ PULLBACK_MA20_DIST = 3.0         # 距离MA20的最大距离（%）
 PULLBACK_PREV_STRENGTH = 20.0    # 前期20日涨幅要求（%）
 PULLBACK_VOL_DECREASE = 0.8      # 回调时成交量相对于5日均值的比例（缩量）
 
+# 4. 早埋伏参数（新增，不影响原策略）
+AMBUSH_NEAR_BOX_TOP_MIN = -8.0   # 距离箱顶下方不超过8%
+AMBUSH_NEAR_BOX_TOP_MAX = -1.0   # 距离箱顶至少1%（尚未突破）
+AMBUSH_BOX_WIDTH_MAX = 100       # 允许更宽箱体
+AMBUSH_MA20_SLOPE_MIN = 0.0      # MA20斜率不为负
+AMBUSH_VOL_RATIO_MIN = 0.9       # 成交量不萎缩过度
+AMBUSH_VOL_RATIO_MAX = 1.6       # 也不要求放巨量
+
 # 基础过滤
 MIN_PRICE = 5
-MAX_PRICE = 100
+MAX_PRICE = 20
 MIN_AMOUNT = 5000  # 万
 
 def get_db_engine():
@@ -152,27 +160,121 @@ def main(target_date=None):
                 close_today >= ma20):
                 is_pullback = True
 
-        # 记录结果
-        if is_breakout or is_three_up or is_pullback:
+        # --- 策略4: 早埋伏（接近突破但未突破） ---
+        is_ambush = False
+        if len(group) >= max(BOX_PERIOD, 40):
+            box_data2 = group.iloc[-BOX_PERIOD:-5]
+            box_high2 = box_data2['high'].max()
+            box_low2 = box_data2['low'].min()
+            box_width2 = (box_high2 - box_low2) / box_low2 * 100 if box_low2 > 0 else 999
+            near_box_top = (close_today - box_high2) / box_high2 * 100 if box_high2 > 0 else -999
+
+            # MA20近5日斜率（简化）
+            ma20_series = group['close'].rolling(20).mean()
+            ma20_slope_5d = (ma20_series.iloc[-1] - ma20_series.iloc[-6]) / ma20_series.iloc[-6] * 100 if len(group) >= 26 and ma20_series.iloc[-6] > 0 else -999
+
+            avg_amount_5b = group['amount'].iloc[-10:-5].mean()
+            vol_ratio_b = amount_today / avg_amount_5b if avg_amount_5b > 0 else 0
+
+            if (AMBUSH_NEAR_BOX_TOP_MIN <= near_box_top <= AMBUSH_NEAR_BOX_TOP_MAX and
+                box_width2 <= AMBUSH_BOX_WIDTH_MAX and
+                ma20_slope_5d >= AMBUSH_MA20_SLOPE_MIN and
+                AMBUSH_VOL_RATIO_MIN <= vol_ratio_b <= AMBUSH_VOL_RATIO_MAX and
+                close_today >= ma20):
+                is_ambush = True
+
+        # 记录结果 + 评分
+        if is_breakout or is_three_up or is_pullback or is_ambush:
             tags = []
             if is_breakout: tags.append("大底突破")
             if is_three_up: tags.append("三连阳")
             if is_pullback: tags.append("空中加油")
-            
+            if is_ambush: tags.append("早埋伏")
+
+            # === 评分体系（0-100）===
+            # 1) 信号分（0-45）
+            signal_score = 0
+            if is_breakout:
+                signal_score += 18
+            if is_three_up:
+                signal_score += 14
+            if is_pullback:
+                signal_score += 13
+            if is_ambush:
+                signal_score += 12
+
+            # 2) 趋势分（0-25）
+            trend_score = 0
+            if ma5 > ma10:
+                trend_score += 8
+            if ma10 > ma20:
+                trend_score += 8
+            if close_today >= ma20:
+                trend_score += 9
+
+            # 3) 动量分（0-20）
+            momentum_score = 0
+            pct_chg_today = latest['pct_chg']
+            if -2 <= pct_chg_today <= 6:
+                momentum_score += 8
+            elif pct_chg_today > 6:
+                momentum_score += 4  # 过热降分
+
+            if len(group) >= 25:
+                prev_20d_chg_for_score = (group['close'].iloc[-1] - group['close'].iloc[-21]) / group['close'].iloc[-21] * 100
+                if 5 <= prev_20d_chg_for_score <= 30:
+                    momentum_score += 12
+                elif prev_20d_chg_for_score > 30:
+                    momentum_score += 6
+
+            # 4) 流动性分（0-10）
+            liquidity_score = min(10, amount_today / 200000)  # 200亿成交额封顶
+
+            # 5) 风险惩罚（0~-15）
+            risk_penalty = 0
+            if abs(pct_chg_today) > 8:
+                risk_penalty -= 6
+            if len(group) >= 10:
+                recent_vol = group['pct_chg'].tail(10).std()
+                if recent_vol > 5:
+                    risk_penalty -= 5
+
+            total_score = max(0, min(100, round(signal_score + trend_score + momentum_score + liquidity_score + risk_penalty, 1)))
+
+            if total_score >= 80:
+                action = "强势关注"
+            elif total_score >= 65:
+                action = "观察买入"
+            elif total_score >= 50:
+                action = "继续观察"
+            else:
+                action = "谨慎回避"
+
+            # 若仅触发早埋伏且评分中等，给出埋伏提示
+            if is_ambush and not (is_breakout or is_three_up or is_pullback) and total_score >= 55:
+                action = "小仓埋伏"
+
             results.append({
                 '代码': ts_code,
                 '收盘价': close_today,
                 '涨幅%': latest['pct_chg'],
                 '成交额(万)': amount_today,
                 '策略标签': ",".join(tags),
-                '标签数': len(tags)
+                '标签数': len(tags),
+                '总分': total_score,
+                '信号分': signal_score,
+                '趋势分': trend_score,
+                '动量分': momentum_score,
+                '流动性分': round(liquidity_score, 1),
+                '风险调整': risk_penalty,
+                '建议动作': action
             })
 
     if not results:
         print("❌ 未筛选出符合任何策略的股票")
         return
 
-    res_df = pd.DataFrame(results).sort_values(by=['标签数', '成交额(万)'], ascending=False)
+    res_df = pd.DataFrame(results).sort_values(by=['总分', '标签数', '成交额(万)'], ascending=False)
     output_path = f"output/stock_selection_combined_{trade_date}.csv"
     res_df.to_csv(output_path, index=False, encoding='utf-8-sig')
     

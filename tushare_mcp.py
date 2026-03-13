@@ -241,13 +241,17 @@ def _get_daily_like_data(
     return pd.DataFrame(), "empty"
 
 
+from typing import Optional, List, Dict, Any, Union
+
+# ... (rest of the imports)
+
 @mcp.tool()
 def get_daily_data(
-    ts_code: str = None,
-    start_date: str = None,
-    end_date: str = None,
-    trade_date: str = None,
-) -> str:
+    ts_code: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    trade_date: Optional[str] = None,
+):
     """
     获取日线行情（兼容 Tushare 官方示例）。
 
@@ -290,8 +294,8 @@ def get_daily_data(
 
 @mcp.tool()
 def get_stock_daily_data(
-    stock_code: str, start_date: str = None, end_date: str = None
-) -> str:
+    stock_code: str, start_date: Optional[str] = None, end_date: Optional[str] = None
+):
     """
     获取个股历史日线行情。
     :param stock_code: 股票代码 (如 000001.SZ)
@@ -318,7 +322,7 @@ def get_stock_daily_data(
 
 
 @mcp.tool()
-def analyze_and_suggest(stock_code: str) -> str:
+def analyze_and_suggest(stock_code: str):
     """
     分析个股涨跌趋势并提供投资建议（基于 MA5/MA20 均线策略）。
     """
@@ -388,7 +392,7 @@ def analyze_and_suggest(stock_code: str) -> str:
 
 
 @mcp.tool()
-def realtime_trade_signal(code: str, trade_date: str = None) -> str:
+def realtime_trade_signal(code: str, trade_date: Optional[str] = None):
     """
     基于东财“日线级”K 线做实时买入/卖出信号分析（MA5/MA20 策略）。
 
@@ -534,7 +538,7 @@ def realtime_trade_signal(code: str, trade_date: str = None) -> str:
 
 
 @mcp.tool()
-def intraday_trade_signal(code: str, mysql_url: str = None) -> str:
+def intraday_trade_signal(code: str, mysql_url: Optional[str] = None):
     """
     盘中买卖信号（结合 MySQL 历史 + 东财盘中最新价）。
 
@@ -874,7 +878,7 @@ def _parse_deepseek_response(response: str) -> dict:
 
 
 @mcp.tool()
-def deepseek_trade_signal(code: str, mysql_url: str = None) -> str:
+def deepseek_trade_signal(code: str, mysql_url: Optional[str] = None):
     """
     使用 DeepSeek AI 分析盘中交易信号（结合 MySQL 历史 + 东财实时数据）。
 
@@ -1014,10 +1018,10 @@ def deepseek_trade_signal(code: str, mysql_url: str = None) -> str:
 @mcp.tool()
 def deepseek_intraday_t_signal(
     code: str,
-    position_cost: float = None,
+    position_cost: Optional[float] = None,
     position_ratio: float = 0.0,
-    mysql_url: str = None,
-) -> str:
+    mysql_url: Optional[str] = None,
+):
     """
     使用 DeepSeek AI 分析盘中做T信号（专注于日内波段交易）。
 
@@ -1612,9 +1616,9 @@ def _parse_percent_to_ratio(s: str) -> float | None:
 
 def deepseek_premarket_analysis(
     code: str,
-    position_cost: float = None,
+    position_cost: Optional[float] = None,
     position_ratio: float = 0.0,
-) -> str:
+):
     """
     盘前分析（开盘前）- 基于昨日收盘数据给出今日操作建议。
 
@@ -1693,9 +1697,9 @@ def deepseek_premarket_analysis(
 
 def deepseek_aftermarket_analysis(
     code: str,
-    position_cost: float = None,
+    position_cost: Optional[float] = None,
     position_ratio: float = 0.0,
-) -> str:
+):
     """
     盘后分析（收盘后）- 复盘今日走势并给出明日展望。
 

@@ -243,12 +243,13 @@ def main() -> int:
     # 配置区：按需修改即可
     # =========================
     MYSQL_URL = os.getenv("MYSQL_URL") or DEFAULT_MYSQL_URL
-    # 从统一位置导入codes（若需要自定义，可在此处覆盖）
-    CODES_LIST = CODES
-    INTERVAL_SECONDS = 10.0  # 每轮间隔秒数（默认 60 秒）
-    PER_CODE_SLEEP_SECONDS = 0.2  # 每个 code 请求后的 sleep（默认 0.2 秒）
-    ONCE = False  # True：只跑一轮就退出（适合 cron）；False：常驻轮询
-    ALL_DAY = False  # True：全天抓取；False：仅交易时段抓取（推荐）
+    # 支持通过环境变量覆盖代码列表，格式：000001,600000,159001
+    codes_env = (os.getenv("SNAPSHOT_CODES") or "").strip()
+    CODES_LIST = [c.strip() for c in codes_env.split(",") if c.strip()] if codes_env else CODES
+    INTERVAL_SECONDS = float(os.getenv("SNAPSHOT_INTERVAL_SECONDS", "10.0"))  # 每轮间隔秒数
+    PER_CODE_SLEEP_SECONDS = float(os.getenv("SNAPSHOT_PER_CODE_SLEEP_SECONDS", "0.2"))  # 每个 code 请求后的 sleep
+    ONCE = str(os.getenv("SNAPSHOT_ONCE", "False")).lower() in ("1", "true", "yes", "y")
+    ALL_DAY = str(os.getenv("SNAPSHOT_ALL_DAY", "False")).lower() in ("1", "true", "yes", "y")
 
     cfg = PollConfig(
         mysql_url=MYSQL_URL,
