@@ -1,0 +1,31 @@
+services:
+  redis:
+    image: redis:alpine
+    container_name: stock-analysis-redis
+    restart: always
+
+  backend:
+    build: ./backend
+    container_name: stock-analysis-backend
+    environment:
+      - HTTP_PROXY=http://host.docker.internal:10887
+      - HTTPS_PROXY=http://host.docker.internal:10887
+      - NO_PROXY=localhost,127.0.0.1,host.docker.internal,backend,redis
+      - REDIS_URL=redis://redis:6379/0
+    env_file:
+      - ../.env
+    volumes:
+      - ../tushare_mcp.py:/app/tushare_mcp.py:ro
+      - ../scripts:/app/scripts:ro
+    depends_on:
+      - redis
+    restart: always
+
+  frontend:
+    build: ./frontend
+    container_name: stock-analysis-frontend
+    ports:
+      - "3301:80"
+    depends_on:
+      - backend
+    restart: always

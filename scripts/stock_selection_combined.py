@@ -15,6 +15,7 @@ from pathlib import Path
 import pandas as pd
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
+from fetch_akshare_data import get_market_sentiment
 
 # 添加项目根目录到 Python 路径
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -73,6 +74,31 @@ def main(target_date=None):
         trade_date = get_latest_trade_date(engine)
     print(f"🚀 开始综合选股扫描，基准日期：{trade_date}")
     
+    # 获取大盘情绪
+    print("📡 正在获取大盘实时情绪...")
+    market_sentiment = get_market_sentiment()
+    market_score_adj = 0
+    hot_sectors = []
+    if market_sentiment:
+        # 获取热门板块列表
+        hot_sectors = market_sentiment.get("热门板块", [])
+        print(f"🔥 当前热门板块：{', '.join(hot_sectors[:3])}...")
+        
+        # 根据涨跌分布计算大盘分 (上涨家数 / (上涨+下跌))
+        try:
+            dist = market_sentiment.get("涨跌分布", "")
+            if "上涨:" in dist and "下跌:" in dist:
+                up_cnt = int(dist.split("上涨:")[1].split(" |")[0])
+                down_cnt = int(dist.split("下跌:")[1].split(" |")[0])
+                if up_cnt + down_cnt > 0:
+                    up_ratio = up_cnt / (up_cnt + down_cnt)
+                    # 赚钱效应好(>60%)加分，差(<40%)扣分
+                    if up_ratio > 0.6: market_score_adj = 5
+                    elif up_ratio < 0.4: market_score_adj = -5
+                    print(f"📊 大盘赚钱效应：{round(up_ratio*100, 1)}%，风险调整：{market_score_adj}")
+        except:
+            pass
+    
     # 获取1100天数据以支持3年大底计算
     end_date_obj = datetime.strptime(trade_date, "%Y%m%d")
     start_date_obj = end_date_obj - timedelta(days=1100)
@@ -87,6 +113,15 @@ def main(target_date=None):
     """
     df_all = pd.read_sql(text(query), engine)
     print(f"✓ 已加载 {len(df_all)} 条记录")
+
+    # 尝试获取个股所属行业信息（如果存在）
+    industry_map = {}
+    try:
+        basic_query = "SELECT ts_code, industry FROM stock_basic"
+        df_basic = pd.read_sql(text(basic_query), engine)
+        industry_map = dict(zip(df_basic['ts_code'], df_basic['industry']))
+    except:
+        print("⚠️ 未能从数据库获取行业信息，将尝试通过 AkShare 获取...")
 
     results = []
     for ts_code, group in df_all.groupby('ts_code'):
@@ -239,7 +274,23 @@ def main(target_date=None):
                 if recent_vol > 5:
                     risk_penalty -= 5
 
-            total_score = max(0, min(100, round(signal_score + trend_score + momentum_score + liquidity_score + risk_penalty, 1)))
+            # 6) 大盘调整 (新增)
+            total_score = max(0, min(100, round(signal_score + trend_score + momentum_score + liquidity_score + risk_penalty + market_score_adj, 1)))
+
+            # 7) 板块调整 (新增)
+            sector_score_adj = 0
+            industry = industry_map.get(ts_code, 'N/A')
+            if industry != 'N/A' and any(industry in s for s in hot_sectors):
+                sector_score_adj = 5
+                total_score = min(100, total_score + sector_score_adj)
+
+            # 8) 三力合一共振 (Market + Sector + Stock)
+            resonance_score = 0
+            # 条件：大盘环境好 + 属于热门板块 + 个股有强信号(标签数>1 或 信号分高)
+            if market_score_adj > 0 and sector_score_adj > 0 and (len(tags) > 1 or signal_score >= 18):
+                resonance_score = 10
+                total_score = min(100, total_score + resonance_score)
+                tags.append("三力合一")
 
             if total_score >= 80:
                 action = "强势关注"
@@ -254,6 +305,25 @@ def main(target_date=None):
             if is_ambush and not (is_breakout or is_three_up or is_pullback) and total_score >= 55:
                 action = "小仓埋伏"
 
+            # === 仓位建议逻辑 ===
+            # 假设总本金为 100,000 元，可根据实际情况调整
+            total_capital = 100000
+            position_ratio = 0
+            if action == "强势关注":
+                position_ratio = 0.20
+            elif action == "观察买入":
+                position_ratio = 0.15
+            elif action == "继续观察":
+                position_ratio = 0.08
+            elif action == "小仓埋伏":
+                position_ratio = 0.05
+            
+            buy_amount_yuan = total_capital * position_ratio
+            buy_shares = 0
+            if close_today > 0 and buy_amount_yuan > 0:
+                # A股买入需为100股的整数倍，向下取整
+                buy_shares = int(buy_amount_yuan / close_today / 100) * 100
+
             results.append({
                 '代码': ts_code,
                 '收盘价': close_today,
@@ -267,7 +337,13 @@ def main(target_date=None):
                 '动量分': momentum_score,
                 '流动性分': round(liquidity_score, 1),
                 '风险调整': risk_penalty,
-                '建议动作': action
+                '大盘调整': market_score_adj,
+                '板块调整': sector_score_adj,
+                '共振加分': resonance_score,
+                '所属行业': industry,
+                '建议动作': action,
+                '建议买入(股)': buy_shares,
+                '预计金额(元)': int(buy_shares * close_today)
             })
 
     if not results:
