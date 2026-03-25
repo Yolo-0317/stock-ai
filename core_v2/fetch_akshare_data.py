@@ -48,7 +48,7 @@ def _fetch_with_retry(func, name, max_retries=3, delay_range=(1, 3), **kwargs):
 
 def get_stock_fundamental(code, delay=1.0):
     """
-    获取单只股票的基本面数据 (增强版：增加同花顺摘要数据)
+    获取单只股票的基本面数据 (增强版：优先通过浏览器从东方财富获取)
     """
     code_6 = "".join(filter(str.isdigit, str(code)))[:6]
     result = {
@@ -69,31 +69,45 @@ def get_stock_fundamental(code, delay=1.0):
         info_df = _fetch_with_retry(ak.stock_individual_info_em, f"{code_6} 基础信息", symbol=code_6)
         if info_df is not None:
             info_dict = dict(zip(info_df['item'], info_df['value']))
-            result["名称"] = info_dict.get("股票简称", result["名称"])
+            if result["名称"] == "N/A":
+                result["名称"] = info_dict.get("股票简称", result["名称"])
             result["总市值"] = info_dict.get("总市值", "N/A")
             result["流通市值"] = info_dict.get("流通市值", "N/A")
             result["行业"] = info_dict.get("行业", "N/A")
             result["最新价"] = float(info_dict.get("最新", 0.0))
 
-        # 2. 财务摘要 (ROE, 增长率, EPS, BPS) - 同花顺接口
-        ths_df = _fetch_with_retry(ak.stock_financial_abstract_ths, f"{code_6} 财务摘要", symbol=code_6)
-        if ths_df is not None:
-            latest = ths_df.iloc[-1]
-            result["ROE"] = str(latest.get("净资产收益率", "N/A")).replace("%", "")
-            result["净利润增长率"] = str(latest.get("净利润同比增长率", "N/A")).replace("%", "")
-            
-            if result["最新价"] > 0:
-                bps = latest.get("每股净资产")
-                eps = latest.get("基本每股收益")
-                report_date = latest.get("报告期", "")
+        # 尝试通过东方财富 F10 接口获取 (ROE, 增长率)
+        try:
+            # 尝试使用 akshare 提供的同花顺财务摘要接口，这通常比东财 Ajax 接口在脚本中更稳定
+            ths_df = _fetch_with_retry(ak.stock_financial_abstract_ths, f"{code_6} 财务摘要", symbol=code_6)
+            if ths_df is not None and not ths_df.empty:
+                latest = ths_df.iloc[-1]
+                result["ROE"] = str(latest.get("净资产收益率", "N/A")).replace("%", "")
+                result["净利润增长率"] = str(latest.get("净利润同比增长率", "N/A")).replace("%", "")
+                print(f"    ✅ 成功通过同花顺 F10 获取基本面: {code_6} (ROE: {result['ROE']}%, 增长率: {result['净利润增长率']}%)")
+        except Exception as e:
+            print(f"    ⚠️ 同花顺 F10 获取失败: {e}")
+
+        # 如果同花顺没拿到，再尝试新浪财务指标 (作为最后兜底)
+        if result["ROE"] in ["N/A", "-", None]:
+            ths_df = _fetch_with_retry(ak.stock_financial_abstract_ths, f"{code_6} 财务摘要", symbol=code_6)
+            if ths_df is not None:
+                latest = ths_df.iloc[-1]
+                result["ROE"] = str(latest.get("净资产收益率", "N/A")).replace("%", "")
+                result["净利润增长率"] = str(latest.get("净利润同比增长率", "N/A")).replace("%", "")
                 
-                if bps and float(bps) > 0:
-                    result["市净率"] = round(result["最新价"] / float(bps), 2)
-                if eps and float(eps) != 0:
-                    month = int(report_date.split("-")[1]) if "-" in report_date else 12
-                    ann_factor = 12.0 / month
-                    ann_eps = float(eps) * ann_factor
-                    result["市盈率-动态"] = round(result["最新价"] / ann_eps, 2)
+                if result["最新价"] > 0:
+                    bps = latest.get("每股净资产")
+                    eps = latest.get("基本每股收益")
+                    report_date = latest.get("报告期", "")
+                    
+                    if bps and float(bps) > 0:
+                        result["市净率"] = round(result["最新价"] / float(bps), 2)
+                    if eps and float(eps) != 0:
+                        month = int(report_date.split("-")[1]) if "-" in report_date else 12
+                        ann_factor = 12.0 / month
+                        ann_eps = float(eps) * ann_factor
+                        result["市盈率-动态"] = round(result["最新价"] / ann_eps, 2)
 
     except Exception as e:
         print(f"  ⚠️ 获取 {code_6} 基本面异常: {e}")

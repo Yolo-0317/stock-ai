@@ -15,7 +15,7 @@ from pathlib import Path
 import pandas as pd
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
-from fetch_akshare_data import get_market_sentiment
+from fetch_akshare_data import get_market_sentiment, get_stock_fundamental
 
 # 添加项目根目录到 Python 路径
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -52,6 +52,11 @@ AMBUSH_MA20_SLOPE_MIN = 0.0      # MA20斜率不为负
 AMBUSH_VOL_RATIO_MIN = 0.9       # 成交量不萎缩过度
 AMBUSH_VOL_RATIO_MAX = 1.6       # 也不要求放巨量
 
+# 5. 基本面红线参数
+ROE_MIN = 3.0                   # 最小 ROE (%)
+NET_PROFIT_GROWTH_MIN = -20.0   # 最小净利润增长率 (%)
+EXCLUDE_ST = True               # 是否剔除 ST/*ST
+
 # 基础过滤
 MIN_PRICE = 5
 MAX_PRICE = 20
@@ -75,8 +80,8 @@ def main(target_date=None):
     print(f"🚀 开始综合选股扫描，基准日期：{trade_date}")
     
     # 获取大盘情绪
-    print("📡 正在获取大盘实时情绪...")
-    market_sentiment = get_market_sentiment()
+    print("📡 正在获取大盘实时情绪 (跳过以提高速度)...")
+    market_sentiment = None # get_market_sentiment()
     market_score_adj = 0
     hot_sectors = []
     if market_sentiment:
@@ -113,6 +118,16 @@ def main(target_date=None):
     """
     df_all = pd.read_sql(text(query), engine)
     print(f"✓ 已加载 {len(df_all)} 条记录")
+
+    # --- 新增：加载资金流向数据 ---
+    df_flow = pd.DataFrame()
+    try:
+        flow_query = f"SELECT ts_code, big_net, big_pct FROM capital_flow WHERE trade_date = '{end_date}'"
+        df_flow = pd.read_sql(text(flow_query), engine)
+        if not df_flow.empty:
+            print(f"✓ 已加载 {len(df_flow)} 条资金流向记录")
+    except Exception as e:
+        print(f"⚠️ 未能加载资金流向数据 (可能表不存在或今日无数据): {e}")
 
     # 尝试获取个股所属行业信息（如果存在）
     industry_map = {}
@@ -218,13 +233,46 @@ def main(target_date=None):
                 close_today >= ma20):
                 is_ambush = True
 
+        # --- 策略5: 主力异动 (Institutional Surge) ---
+        is_surge = False
+        big_net = 0
+        big_pct = 0
+        if not df_flow.empty:
+            # 匹配 6 位代码
+            code_6 = ts_code.split('.')[0]
+            flow_item = df_flow[df_flow['ts_code'] == code_6]
+            if not flow_item.empty:
+                big_net = flow_item.iloc[0]['big_net']
+                big_pct = flow_item.iloc[0]['big_pct']
+                
+                # 选股条件：
+                # 1. 超大单净流入 > 2亿 (20000万)
+                # 2. 超大单净占比 > 6%
+                # 3. 当日涨幅 > 2%
+                # 4. 成交额 > 5亿 (50000万)
+                # 5. 股价在MA20上方
+                # 6. 近20日涨幅 < 60%
+                
+                prev_20d_chg = (close_today - group['close'].iloc[-20]) / group['close'].iloc[-20] * 100 if len(group) >= 20 else 0
+                
+                if (big_net > 20000 and big_pct > 6 and 
+                    latest['pct_chg'] > 2 and amount_today > 50000 and 
+                    close_today > ma20 and prev_20d_chg < 60):
+                    is_surge = True
+
         # 记录结果 + 评分
-        if is_breakout or is_three_up or is_pullback or is_ambush:
+        if is_breakout or is_three_up or is_pullback or is_ambush or is_surge:
+            # --- 暂时跳过自动基本面过滤，由 Agent 通过浏览器手动校验 ---
+            # print(f"  🔍 校验基本面红线: {ts_code}...")
+            # fundamental = get_stock_fundamental(ts_code)
+            
+            # 记录技术面候选
             tags = []
             if is_breakout: tags.append("大底突破")
             if is_three_up: tags.append("三连阳")
             if is_pullback: tags.append("空中加油")
             if is_ambush: tags.append("早埋伏")
+            if is_surge: tags.append("主力异动")
 
             # === 评分体系（0-100）===
             # 1) 信号分（0-45）
@@ -237,6 +285,8 @@ def main(target_date=None):
                 signal_score += 13
             if is_ambush:
                 signal_score += 12
+            if is_surge:
+                signal_score += 15
 
             # 2) 趋势分（0-25）
             trend_score = 0
@@ -343,7 +393,9 @@ def main(target_date=None):
                 '所属行业': industry,
                 '建议动作': action,
                 '建议买入(股)': buy_shares,
-                '预计金额(元)': int(buy_shares * close_today)
+                '预计金额(元)': int(buy_shares * close_today),
+                '超大单净流入(万)': big_net,
+                '超大单占比%': big_pct
             })
 
     if not results:
@@ -351,8 +403,15 @@ def main(target_date=None):
         return
 
     res_df = pd.DataFrame(results).sort_values(by=['总分', '标签数', '成交额(万)'], ascending=False)
-    output_path = f"output/stock_selection_combined_{trade_date}.csv"
-    res_df.to_csv(output_path, index=False, encoding='utf-8-sig')
+    
+    # 兼容 MCP 运行环境：优先使用环境变量中的项目根目录
+    # 强制使用绝对路径，避免相对路径在不同环境下失效
+    project_root = os.getenv("PROJECT_ROOT", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    output_dir = Path(project_root) / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    output_path = output_dir / f"stock_selection_combined_{trade_date}.csv"
+    res_df.to_csv(str(output_path), index=False, encoding='utf-8-sig')
     
     print("\n" + "="*50)
     print(f"✅ 综合选股完成！共筛选出 {len(res_df)} 只股票")

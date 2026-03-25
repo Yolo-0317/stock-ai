@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from tushare_mcp import deepseek_trade_signal, _call_deepseek_api
-from scripts.fetch_akshare_data import (
+from fetch_akshare_data import (
     get_stock_fundamental, 
     get_market_sentiment, 
     get_stock_fund_flow, 
